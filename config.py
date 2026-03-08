@@ -55,12 +55,12 @@ ROLLING_WINDOWS: list[int] = [7, 30]
 
 # ─── AQI Health Categories (CPCB India standard) ──────────────────────────────
 AQI_CATEGORIES: list[dict] = [
-    {"label": "Good",           "min": 0,   "max": 50,  "color": "#00e400"},
-    {"label": "Satisfactory",   "min": 51,  "max": 100, "color": "#92d050"},
-    {"label": "Moderate",       "min": 101, "max": 200, "color": "#ffff00"},
-    {"label": "Poor",           "min": 201, "max": 300, "color": "#ff7e00"},
-    {"label": "Very Poor",      "min": 301, "max": 400, "color": "#ff0000"},
-    {"label": "Severe",         "min": 401, "max": 500, "color": "#7e0023"},
+    {"label": "Good",           "min": 0,   "max": 50,  "color": "#16a34a"},
+    {"label": "Satisfactory",   "min": 51,  "max": 100, "color": "#65a30d"},
+    {"label": "Moderate",       "min": 101, "max": 200, "color": "#d97706"},
+    {"label": "Poor",           "min": 201, "max": 300, "color": "#ea580c"},
+    {"label": "Very Poor",      "min": 301, "max": 400, "color": "#dc2626"},
+    {"label": "Severe",         "min": 401, "max": 500, "color": "#7f1d1d"},
 ]
 
 def get_aqi_category(aqi: float) -> dict:

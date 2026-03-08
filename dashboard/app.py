@@ -23,6 +23,15 @@ from pipeline.db import (
 )
 from pipeline.fetch_data import fetch_current_aqi
 
+# ─── Badge text-color helper ──────────────────────────────────────────────────
+
+def badge_text_color(hex_color: str) -> str:
+    """Return #fff or #1a1a1a based on relative luminance of the background."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+    return "#ffffff" if luminance < 0.55 else "#1a1a1a"
+
 # ─── Page config ──────────────────────────────────────────────────────────────
 
 st.set_page_config(
@@ -387,6 +396,7 @@ live_cat = get_aqi_category(live_aqi) if live_aqi is not None else None
 dot_color  = live_cat["color"] if live_cat else "#6366f1"
 cat_label  = live_cat["label"] if live_cat else "Loading…"
 live_value = f"{live_aqi:.0f}" if live_aqi else "—"
+badge_fg   = badge_text_color(dot_color)
 
 st.markdown(
     f"<div class='aircast-header'>"
@@ -403,7 +413,7 @@ st.markdown(
     f"border:1px solid rgba(99,102,241,0.18);border-radius:20px;padding:5px 14px;"
     f"font-family:Inter,sans-serif;font-weight:500;'>"
     f"<span class='dot' style='background:{dot_color};'></span>Live monitoring</div>"
-    f"<div style='font-size:13px;font-weight:700;color:white;"
+    f"<div style='font-size:13px;font-weight:700;color:{badge_fg};"
     f"background:{dot_color};border-radius:20px;padding:5px 16px;"
     f"font-family:Inter,sans-serif;box-shadow:0 2px 12px {dot_color}55;'>"
     f"AQI {live_value} · {cat_label}</div>"
