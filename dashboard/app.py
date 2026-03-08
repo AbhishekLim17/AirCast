@@ -40,10 +40,10 @@ st.markdown("""
 
   html, body, [class*="css"] { font-family: 'Inter', sans-serif !important; }
 
-  /* ── Dreamy gradient background ── */
+  /* ── Aurora gradient background ── */
   .stApp {
     background: linear-gradient(135deg,
-      #dbeafe 0%, #ede9fe 35%, #fce7f3 65%, #d1fae5 100%);
+      #e0e7ff 0%, #ede9fe 30%, #e0f2fe 65%, #f0fdf4 100%);
     background-attachment: fixed;
   }
 
@@ -51,7 +51,7 @@ st.markdown("""
 
   /* ── Glass cards via st.container(border=True) ── */
   [data-testid="stVerticalBlockBorderWrapper"] {
-    background: rgba(255, 255, 255, 0.65) !important;
+    background: rgba(255, 255, 255, 0.72) !important;
     backdrop-filter: blur(24px) saturate(180%) !important;
     -webkit-backdrop-filter: blur(24px) saturate(180%) !important;
     border: 1px solid rgba(255, 255, 255, 0.88) !important;
@@ -77,7 +77,7 @@ st.markdown("""
     font-weight: 700;
     letter-spacing: 2.5px;
     text-transform: uppercase;
-    color: #6366f1;
+    color: #4f46e5;
     margin-bottom: 2px;
     font-family: 'Inter', sans-serif;
   }
@@ -94,18 +94,18 @@ st.markdown("""
     display: inline-flex;
     flex-direction: column;
     align-items: center;
-    background: rgba(255,255,255,0.85);
-    border: 1px solid rgba(99,102,241,0.2);
+    background: linear-gradient(145deg, rgba(238,242,255,0.9), rgba(255,255,255,0.95));
+    border: 1px solid rgba(79,70,229,0.18);
     border-top: 1.5px solid rgba(255,255,255,0.97);
     border-radius: 14px;
     padding: 14px 18px;
     min-width: 80px;
-    box-shadow: 0 2px 12px rgba(99,102,241,0.1);
+    box-shadow: 0 2px 14px rgba(79,70,229,0.12);
     flex: 1;
   }
   .stat-value { font-size: 24px; font-weight: 800; color: #1e1b4b; letter-spacing: -0.5px; }
   .stat-label { font-size: 9px; font-weight: 700; letter-spacing: 2px;
-                text-transform: uppercase; color: #6366f1; margin-top: 3px; }
+                text-transform: uppercase; color: #4f46e5; margin-top: 3px; }
 
   /* ── Glow line ── */
   .glow-line { height: 2px; border-radius: 2px; margin: 10px 0 16px 0; opacity: 0.65; }
@@ -141,7 +141,7 @@ st.markdown("""
 
   /* ── Slider ── */
   [data-testid="stSlider"] > div > div > div > div {
-    background: linear-gradient(90deg, #6366f1, #8b5cf6) !important;
+    background: linear-gradient(90deg, #4f46e5, #7c3aed) !important;
   }
 
   /* ── Divider ── */
@@ -508,10 +508,10 @@ with col_stats:
                 fillcolor="rgba(99,102,241,0.08)",
             ))
             fig_spark.add_hline(
-                y=20, line_dash="dot", line_color="rgba(234,179,8,0.7)",
+                y=20, line_dash="dot", line_color="rgba(249,115,22,0.8)",
                 annotation_text="threshold",
                 annotation_font_size=9,
-                annotation_font_color="rgba(161,130,8,0.8)",
+                annotation_font_color="#c2410c",
             )
             fig_spark.update_layout(
                 height=100, margin=dict(t=4, b=4, l=0, r=0),
@@ -595,10 +595,10 @@ with col_acc:
                 fill="tozeroy", fillcolor="rgba(99,102,241,0.07)",
             ), row=1, col=1)
             fig3.add_hline(
-                y=20, line_dash="dash", line_color="rgba(234,179,8,0.7)",
+                y=20, line_dash="dash", line_color="rgba(249,115,22,0.8)",
                 annotation_text="retrain threshold",
                 annotation_font_size=9,
-                annotation_font_color="rgba(161,130,8,0.8)",
+                annotation_font_color="#c2410c",
                 row=1, col=1,
             )
             fig3.add_trace(go.Scatter(
