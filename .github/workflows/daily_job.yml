@@ -1,0 +1,47 @@
+name: AirCast Daily Job
+
+on:
+  # Runs every day at 06:00 UTC (11:30 AM IST)
+  schedule:
+    - cron: "0 6 * * *"
+
+  # Allow manual trigger from GitHub Actions UI for testing
+  workflow_dispatch:
+
+jobs:
+  daily-aqi-job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run daily AQI job
+        run: python -m scheduler.daily_job
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-job-logs-${{ github.run_id }}
+          path: "*.log"
+          retention-days: 7
+
+    env:
+      WAQI_API_TOKEN:        ${{ secrets.WAQI_API_TOKEN }}
+      SUPABASE_URL:          ${{ secrets.SUPABASE_URL }}
+      SUPABASE_KEY:          ${{ secrets.SUPABASE_KEY }}
+      HF_TOKEN:              ${{ secrets.HF_TOKEN }}
+      HF_USERNAME:           ${{ secrets.HF_USERNAME }}
+      HF_REPO_NAME:          ${{ secrets.HF_REPO_NAME }}
+      RETRAIN_MAE_THRESHOLD: ${{ secrets.RETRAIN_MAE_THRESHOLD }}

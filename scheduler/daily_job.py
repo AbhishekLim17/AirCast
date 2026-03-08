@@ -1,0 +1,406 @@
+"""
+scheduler/daily_job.py
+AirCast — Daily self-correction orchestrator for the Ahmedabad AQI prediction pipeline.
+
+Execution order:
+  1. Fetch yesterday's actual AQI from WAQI and upsert into DB
+  2. Load yesterday's prediction from DB (made the previous day)
+  3. Compare actual vs predicted — compute and log accuracy metrics
+  4. Decide whether to retrain (MAE > threshold over last N days)
+  5. If retraining → run full retrain, push new model to HF Hub
+  6. Load best available model (new or existing)
+  7. Fetch today's latest AQI reading as seed features
+  8. Generate tomorrow's prediction and store it in DB
+
+Run locally:
+    python -m scheduler.daily_job
+
+Run with forced retrain:
+    python -m scheduler.daily_job --force-retrain
+
+Run dry (no DB writes):
+    python -m scheduler.daily_job --dry-run
+"""
+
+import argparse
+import logging
+import sys
+from datetime import date, timedelta
+
+import numpy as np
+
+from config import (
+    PRIMARY_STATION,
+    RETRAIN_MAE_THRESHOLD,
+    LAG_DAYS as FEATURE_LAGS,
+    ROLLING_WINDOWS,
+)
+from pipeline.fetch_data import fetch_current_aqi, fetch_yesterday_aqi
+from pipeline.db import (
+    upsert_actual,
+    get_actuals,
+    get_prediction_for_date,
+    insert_prediction,
+    log_performance,
+    get_performance_history,
+    get_latest_model_version,
+)
+from pipeline.evaluate import compute_metrics, should_retrain
+from pipeline.model_store import load_model, push_model
+from pipeline.train import retrain as run_retrain
+
+# ─── Logging setup ────────────────────────────────────────────────────────────
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger(__name__)
+
+EVAL_WINDOW_DAYS = 7   # number of recent days used to decide retraining
+
+
+# ─── Step helpers ─────────────────────────────────────────────────────────────
+
+def step_fetch_actual(yesterday: date, dry_run: bool) -> float | None:
+    """Fetch yesterday's AQI from WAQI and store in DB. Returns the AQI value."""
+    logger.info("━━ Step 1: Fetch yesterday's actual AQI (%s) ━━", yesterday)
+
+    data = fetch_yesterday_aqi(PRIMARY_STATION)
+    if data is None:
+        logger.warning("WAQI returned no data for %s — trying current reading as fallback", yesterday)
+        data = fetch_current_aqi(PRIMARY_STATION)
+
+    if data is None:
+        logger.error("Could not fetch AQI data from WAQI. Aborting.")
+        return None
+
+    actual_aqi = float(data.get("aqi") or data.get("value", 0))
+    dominant   = data.get("dominentpol", "unknown")
+
+    logger.info("  Actual AQI for %s: %.1f (dominant: %s)", yesterday, actual_aqi, dominant)
+
+    if not dry_run:
+        upsert_actual({
+            "date":               yesterday,
+            "station":            PRIMARY_STATION,
+            "aqi":                actual_aqi,
+            "dominant_pollutant": dominant,
+        })
+        logger.info("  ✓ Saved to DB")
+    else:
+        logger.info("  [DRY-RUN] Skipped DB write")
+
+    return actual_aqi
+
+
+def step_load_prediction(yesterday: date) -> float | None:
+    """Load the prediction we made yesterday for yesterday's date."""
+    logger.info("━━ Step 2: Load yesterday's stored prediction (%s) ━━", yesterday)
+
+    row = get_prediction_for_date(target_date=yesterday, station=PRIMARY_STATION)
+    if row is None:
+        logger.warning("  No stored prediction found for %s — skipping comparison", yesterday)
+        return None
+
+    predicted = float(row["predicted"])
+    model_ver = row.get("model_ver", "unknown")
+    logger.info("  Stored prediction: %.1f  (model: %s)", predicted, model_ver)
+    return predicted
+
+
+def step_evaluate(
+    yesterday: date,
+    actual: float,
+    predicted: float,
+    dry_run: bool,
+) -> dict:
+    """Compute point-in-time metrics and log them to DB."""
+    logger.info("━━ Step 3: Evaluate accuracy ━━")
+
+    m = compute_metrics(np.array([actual]), np.array([predicted]))
+    logger.info(
+        "  Point MAE: %.2f  RMSE: %.2f  MAPE: %.2f%%",
+        m["mae"], m["rmse"], m["mape"],
+    )
+
+    if not dry_run:
+        log_performance(
+            eval_date=yesterday,
+            model_ver=get_latest_model_version() or "unknown",
+            mae=m["mae"],
+            rmse=m["rmse"],
+            mape=m["mape"],
+            retrain_triggered=False,
+        )
+        logger.info("  ✓ Performance logged to DB")
+    else:
+        logger.info("  [DRY-RUN] Skipped DB write")
+
+    return m
+
+
+def step_decide_retrain(force: bool) -> tuple[bool, str]:
+    """
+    Check rolling MAE over last EVAL_WINDOW_DAYS days.
+    Returns (should_retrain_bool, reason_string).
+    """
+    logger.info("━━ Step 4: Decide retraining ━━")
+
+    if force:
+        reason = "forced via --force-retrain flag"
+        logger.info("  Retraining FORCED: %s", reason)
+        return True, reason
+
+    history = get_performance_history(days=EVAL_WINDOW_DAYS)
+    if not history:
+        reason = "no performance history yet — skipping retrain"
+        logger.info("  %s", reason)
+        return False, reason
+
+    recent_maes = [row["mae"] for row in history if row.get("mae") is not None]
+    if not recent_maes:
+        return False, "no MAE values in history"
+
+    rolling_mae = float(np.mean(recent_maes))
+    logger.info(
+        "  Rolling MAE (%d-day): %.2f  |  threshold: %.2f",
+        EVAL_WINDOW_DAYS, rolling_mae, RETRAIN_MAE_THRESHOLD,
+    )
+
+    if rolling_mae > RETRAIN_MAE_THRESHOLD:
+        reason = f"rolling {EVAL_WINDOW_DAYS}d MAE {rolling_mae:.2f} > threshold {RETRAIN_MAE_THRESHOLD}"
+        logger.info("  ✓ Retraining TRIGGERED: %s", reason)
+        return True, reason
+    else:
+        reason = f"rolling MAE {rolling_mae:.2f} within threshold — no retrain needed"
+        logger.info("  %s", reason)
+        return False, reason
+
+
+def step_retrain(reason: str, dry_run: bool) -> str | None:
+    """Run full retraining + push to HF Hub. Returns new model version or None."""
+    logger.info("━━ Step 5: Retraining model ━━")
+    logger.info("  Reason: %s", reason)
+
+    if dry_run:
+        logger.info("  [DRY-RUN] Skipped actual retrain")
+        return None
+
+    try:
+        model, feature_cols, metrics = run_retrain(push=True)  # trains + pushes to HF Hub
+        new_ver = metrics.get("model_ver", f"retrain-{date.today().isoformat()}")
+        logger.info("  ✓ Retrain complete — new model version: %s", new_ver)
+        return new_ver
+    except Exception as exc:
+        logger.error("  ✗ Retrain failed: %s", exc, exc_info=True)
+        return None
+
+
+def step_update_performance_log(
+    yesterday: date,
+    old_ver: str,
+    new_ver: str,
+    reason: str,
+    dry_run: bool,
+) -> None:
+    """Overwrite the performance row for yesterday to reflect the retrain event."""
+    if dry_run or new_ver is None:
+        return
+
+    history = get_performance_history(days=2)
+    row = history[0] if history else {}
+
+    log_performance(
+        eval_date=yesterday,
+        model_ver=old_ver,
+        mae=row.get("mae", 0),
+        rmse=row.get("rmse", 0),
+        mape=row.get("mape", 0),
+        retrain_triggered=True,
+        retrain_reason=reason,
+        new_model_ver=new_ver,
+        promoted=True,
+    )
+    logger.info("  ✓ Performance row updated with retrain metadata")
+
+
+def step_predict_tomorrow(today: date, dry_run: bool) -> float | None:
+    """
+    Build a feature vector from today's latest AQI + recent actuals,
+    run the model, and store the prediction for tomorrow.
+    """
+    logger.info("━━ Step 6: Predict tomorrow's AQI (%s) ━━", today + timedelta(days=1))
+
+    # Load best available model
+    result = load_model()
+    if result is None:
+        logger.error("  No model available — cannot generate prediction")
+        return None
+
+    model, feature_cols, model_metrics = result
+    model_ver = model_metrics.get("version", "unknown") if isinstance(model_metrics, dict) else "unknown"
+
+    # Pull last 30 days of actuals to build lag/rolling features
+    actuals_rows = get_actuals(station=PRIMARY_STATION, days=35)
+
+    if len(actuals_rows) < max(FEATURE_LAGS + [max(ROLLING_WINDOWS)]):
+        logger.warning(
+            "  Only %d days of actuals in DB — using live AQI reading for feature seed",
+            len(actuals_rows),
+        )
+        live = fetch_current_aqi(PRIMARY_STATION)
+        if live is None:
+            logger.error("  Could not fetch live AQI — aborting prediction")
+            return None
+        current_aqi = float(live.get("aqi") or live.get("value", 100))
+        # Minimal feature vector: repeat current AQI for all lag/rolling features
+        feat_values = {col: current_aqi for col in feature_cols}
+        _add_temporal_features(feat_values, today + timedelta(days=1))
+    else:
+        feat_values = _build_features_from_actuals(actuals_rows, today, feature_cols)
+
+    # Convert to numpy row
+    X = np.array([[feat_values.get(col, 0.0) for col in feature_cols]])
+    predicted_aqi = float(model.predict(X)[0])
+    predicted_aqi = max(0.0, round(predicted_aqi, 1))
+
+    logger.info("  Predicted AQI for %s: %.1f  (model: %s)",
+                today + timedelta(days=1), predicted_aqi, model_ver)
+
+    if not dry_run:
+        insert_prediction(
+            target_date=today + timedelta(days=1),
+            predicted_aqi=predicted_aqi,
+            model_ver=model_ver,
+            station=PRIMARY_STATION,
+        )
+        logger.info("  ✓ Prediction stored in DB")
+    else:
+        logger.info("  [DRY-RUN] Skipped DB write")
+
+    return predicted_aqi
+
+
+# ─── Feature building helpers ─────────────────────────────────────────────────
+
+def _add_temporal_features(feat: dict, target_date: date) -> None:
+    """Inject cyclical and seasonal features for a given date."""
+    import math
+
+    doy  = target_date.timetuple().tm_yday
+    dow  = target_date.weekday()          # 0 = Monday
+    m    = target_date.month
+
+    feat["dow_sin"]          = math.sin(2 * math.pi * dow  / 7)
+    feat["dow_cos"]          = math.cos(2 * math.pi * dow  / 7)
+    feat["month_sin"]        = math.sin(2 * math.pi * (m - 1) / 12)
+    feat["month_cos"]        = math.cos(2 * math.pi * (m - 1) / 12)
+    feat["day_of_year_norm"] = doy / 365.0
+    feat["is_winter"]        = int(m in (11, 12, 1, 2))
+    feat["is_summer"]        = int(m in (3, 4, 5))
+    feat["is_monsoon"]       = int(m in (6, 7, 8, 9))
+
+
+def _build_features_from_actuals(
+    actuals: list[dict],
+    today: date,
+    feature_cols: list[str],
+) -> dict:
+    """
+    Reconstruct the feature vector that would be used to predict tomorrow
+    using recent actual AQI values from the DB.
+    """
+    import math
+
+    # Sort actuals descending by date
+    actuals_sorted = sorted(actuals, key=lambda r: r["date"], reverse=True)
+    aqi_series = [float(r["actual_aqi"]) for r in actuals_sorted]
+
+    feat: dict = {}
+    target_date = today + timedelta(days=1)
+
+    # Current (today's) AQI is the most recent reading
+    current = aqi_series[0] if aqi_series else 100.0
+
+    # Raw pollutants — we only have AQI in actuals; set pollutants to 0 unless available
+    for col in ["PM2.5", "PM10", "NO", "NO2", "NOx", "NH3", "SO2", "CO", "O3", "Benzene", "Toluene", "Xylene"]:
+        feat[col] = actuals_sorted[0].get(col, 0.0) if actuals_sorted else 0.0
+
+    # Lag features
+    for lag in FEATURE_LAGS:
+        feat[f"aqi_lag_{lag}d"] = aqi_series[lag - 1] if len(aqi_series) >= lag else current
+
+    # Rolling means
+    for window in ROLLING_WINDOWS:
+        window_vals = aqi_series[:window]
+        feat[f"aqi_roll_{window}d"] = float(np.mean(window_vals)) if window_vals else current
+
+    # pm_ratio: PM2.5/PM10 (default 0.5 if unknown)
+    feat["pm_ratio"] = (feat["PM2.5"] / feat["PM10"]) if feat.get("PM10", 0) > 0 else 0.5
+
+    _add_temporal_features(feat, target_date)
+    return feat
+
+
+# ─── Main orchestrator ────────────────────────────────────────────────────────
+
+def run(force_retrain: bool = False, dry_run: bool = False) -> None:
+    today     = date.today()
+    yesterday = today - timedelta(days=1)
+
+    logger.info("╔══════════════════════════════════════════════╗")
+    logger.info("║   AQI Daily Job — %s                ║", today.isoformat())
+    logger.info("╚══════════════════════════════════════════════╝")
+
+    # ── 1. Fetch actual AQI for yesterday ──────────────────────────────────────
+    actual = step_fetch_actual(yesterday, dry_run)
+
+    # ── 2. Load stored prediction for yesterday ────────────────────────────────
+    predicted = step_load_prediction(yesterday)
+
+    # ── 3. Evaluate (only if we have both actual and prediction) ───────────────
+    if actual is not None and predicted is not None:
+        step_evaluate(yesterday, actual, predicted, dry_run)
+    else:
+        logger.warning("Skipping evaluation — missing actual or prediction for %s", yesterday)
+
+    # ── 4. Decide retraining ───────────────────────────────────────────────────
+    do_retrain, reason = step_decide_retrain(force=force_retrain)
+
+    # ── 5. Retrain if needed ───────────────────────────────────────────────────
+    new_ver = None
+    if do_retrain:
+        old_ver = get_latest_model_version() or "unknown"
+        new_ver = step_retrain(reason, dry_run)
+        if new_ver:
+            step_update_performance_log(yesterday, old_ver, new_ver, reason, dry_run)
+
+    # ── 6. Predict tomorrow ────────────────────────────────────────────────────
+    predicted_tomorrow = step_predict_tomorrow(today, dry_run)
+
+    # ── Summary ────────────────────────────────────────────────────────────────
+    logger.info("")
+    logger.info("╔══════════════════════════════════════════════╗")
+    logger.info("║   DAILY JOB COMPLETE                        ║")
+    logger.info("╠══════════════════════════════════════════════╣")
+    logger.info("║   Yesterday actual   : %-20s  ║", f"{actual:.1f}" if actual else "N/A")
+    logger.info("║   Yesterday predicted: %-20s  ║", f"{predicted:.1f}" if predicted else "N/A")
+    logger.info("║   Retrain triggered  : %-20s  ║", str(do_retrain))
+    if new_ver:
+        logger.info("║   New model version  : %-20s  ║", new_ver)
+    logger.info("║   Tomorrow forecast  : %-20s  ║", f"{predicted_tomorrow:.1f}" if predicted_tomorrow else "N/A")
+    logger.info("╚══════════════════════════════════════════════╝")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="AQI daily self-correction job")
+    parser.add_argument("--force-retrain", action="store_true",
+                        help="Force retraining regardless of current metrics")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Run pipeline without writing anything to the DB")
+    args = parser.parse_args()
+
+    run(force_retrain=args.force_retrain, dry_run=args.dry_run)
