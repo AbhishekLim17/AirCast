@@ -8,7 +8,6 @@ xgboost==2.0.3
 joblib==1.4.2
 
 supabase==2.5.0
-psycopg2-binary==2.9.9
 
 requests==2.32.3
 python-dotenv==1.0.1
