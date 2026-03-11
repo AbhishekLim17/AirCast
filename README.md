@@ -1,5 +1,7 @@
 # AirCast
 
+**Live Dashboard → [aircast-abad.streamlit.app](https://aircast-abad.streamlit.app)**
+
 A self-correcting AQI (Air Quality Index) forecasting system for Ahmedabad, India.  
 Every day it fetches real AQI data, compares it against what it predicted the day before,  
 logs the error, and retrains itself automatically if accuracy drops below threshold.
@@ -33,7 +35,7 @@ Streamlit Dashboard (Streamlit Community Cloud)
 
 | Layer | Tool | Cost |
 |---|---|---|
-| Language | Python 3.11 | Free |
+| Language | Python 3.13 | Free |
 | ML Model | XGBoost + Optuna tuning | Free |
 | Database | Supabase (PostgreSQL) | Free (500MB) |
 | Model Storage | Hugging Face Hub | Free |
@@ -46,10 +48,10 @@ Streamlit Dashboard (Streamlit Community Cloud)
 ## Project Structure
 
 ```
-AQI/
+AirCast/
 ├── data/
 │   ├── raw/                    # Downloaded Kaggle CSVs (gitignored)
-│   └── processed/              # Feature-engineered dataset
+│   └── processed/              # Feature-engineered dataset (gitignored)
 ├── pipeline/
 │   ├── fetch_data.py           # WAQI API client
 │   ├── db.py                   # Supabase helper functions
@@ -66,15 +68,12 @@ AQI/
 ├── notebooks/
 │   ├── 01_eda.ipynb            # Exploratory Data Analysis
 │   └── 02_xgboost.ipynb        # Model training walkthrough
-├── tests/
-│   ├── test_pipeline.py
-│   ├── test_db.py
-│   └── test_daily_job.py
 ├── .github/
 │   └── workflows/
 │       └── daily_job.yml       # GitHub Actions cron job
 ├── config.py                   # All constants & env loading
-├── requirements.txt
+├── requirements.txt            # Streamlit Cloud deps
+├── requirements-actions.txt    # GitHub Actions deps
 ├── .env.example
 └── README.md
 ```
@@ -86,11 +85,11 @@ AQI/
 ### 1. Clone & install
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/aqi-prediction.git
-cd aqi-prediction
+git clone https://github.com/AbhishekLim17/AirCast.git
+cd AirCast
 python -m venv venv
 venv\Scripts\activate        # Windows
-pip install -r requirements.txt
+pip install -r requirements-actions.txt
 ```
 
 ### 2. Configure environment
@@ -120,7 +119,7 @@ In your GitHub repo → Settings → Secrets and variables → Actions, add the 
 python pipeline/fetch_data.py
 
 # Run full daily job locally
-python scheduler/daily_job.py
+python -m scheduler.daily_job
 ```
 
 ### 6. Launch dashboard locally
@@ -137,23 +136,34 @@ streamlit run dashboard/app.py
 |---|---|---|
 | 0 – 50 | Good | Green |
 | 51 – 100 | Satisfactory | Light Green |
-| 101 – 200 | Moderate | Yellow |
+| 101 – 200 | Moderate | Amber |
 | 201 – 300 | Poor | Orange |
 | 301 – 400 | Very Poor | Red |
 | 401 – 500 | Severe | Dark Red |
 
 ---
 
+## Model Performance
+
+| Metric | Value |
+|---|---|
+| MAE | ~8.65 |
+| MAPE | ~5.01% |
+| Algorithm | XGBoost (Optuna-tuned) |
+| Training data | Kaggle India AQI 2015–2020 (Ahmedabad) |
+
+---
+
 ## Development Phases
 
 - [x] Phase 1 — Foundation & Environment Setup
-- [ ] Phase 2 — Data Layer (Fetch + Store)
-- [ ] Phase 3 — Feature Engineering & Historical Data
-- [ ] Phase 4 — Model Training (XGBoost)
-- [ ] Phase 5 — Self-Correction Daily Job
-- [ ] Phase 6 — Streamlit Dashboard
-- [ ] Phase 7 — Integration Testing
-- [ ] Final Phase — Cleanup & Release
+- [x] Phase 2 — Data Layer (Fetch + Store)
+- [x] Phase 3 — Feature Engineering & Historical Data
+- [x] Phase 4 — Model Training (XGBoost)
+- [x] Phase 5 — Self-Correction Daily Job
+- [x] Phase 6 — Streamlit Dashboard
+- [x] Phase 7 — Integration Testing
+- [x] Final Phase — Cleanup & Release
 
 ---
 
