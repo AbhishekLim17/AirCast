@@ -118,8 +118,11 @@ def _load_and_filter(raw_csv: Path) -> pd.DataFrame:
     df["Date"] = pd.to_datetime(df["Date"])
     df = df.sort_values("Date").set_index("Date")
 
-    # Keep only the columns we actually use
-    keep = [c for c in POLLUTANT_COLS if c in df.columns] + ["AQI"]
+    # Keep only columns we need — drop same-day pollutant concentrations to prevent
+    # data leakage. AQI is computed FROM these values (max sub-index), so including
+    # them as features gives artificially low error during training but they are
+    # unavailable at inference time when predicting tomorrow's AQI.
+    keep = ["AQI"]
     df = df[keep]
 
     logger.info("Loaded %d rows for %s (%s → %s)",
@@ -141,7 +144,7 @@ def _fill_gaps(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add lag, rolling average, and cyclical time-encoding features."""
+    """Add lag, rolling, momentum, volatility, and cyclical features."""
     df = df.copy()
 
     # ── Lag features (AQI n days ago) ──────────────────────────────────────
@@ -149,35 +152,61 @@ def _engineer_features(df: pd.DataFrame) -> pd.DataFrame:
         df[f"aqi_lag_{lag}d"] = df["AQI"].shift(lag)
         logger.debug("Added lag feature: aqi_lag_%dd", lag)
 
-    # ── Rolling averages ───────────────────────────────────────────────────
+    # ── Rolling statistics ─────────────────────────────────────────────────
+    shifted = df["AQI"].shift(1)  # Avoid look-ahead by shifting 1 day
     for window in ROLLING_WINDOWS:
-        df[f"aqi_roll_{window}d"] = (
-            df["AQI"].shift(1).rolling(window=window, min_periods=max(1, window // 2)).mean()
-        )
-        logger.debug("Added rolling feature: aqi_roll_%dd", window)
+        min_p = max(1, window // 2)
+        df[f"aqi_roll_{window}d"] = shifted.rolling(window=window, min_periods=min_p).mean()
+        df[f"aqi_rstd_{window}d"] = shifted.rolling(window=window, min_periods=min_p).std()
+        df[f"aqi_rmin_{window}d"] = shifted.rolling(window=window, min_periods=min_p).min()
+        df[f"aqi_rmax_{window}d"] = shifted.rolling(window=window, min_periods=min_p).max()
+        logger.debug("Added rolling stats: window=%d (mean/std/min/max)", window)
+
+    # ── Range / volatility ratio ───────────────────────────────────────────
+    # Ratio of (max - min) / mean over a 7-day window — captures how volatile AQI is
+    roll7_mean = shifted.rolling(window=7, min_periods=3).mean()
+    roll7_min  = shifted.rolling(window=7, min_periods=3).min()
+    roll7_max  = shifted.rolling(window=7, min_periods=3).max()
+    df["aqi_volatility_7d"] = (roll7_max - roll7_min) / roll7_mean.replace(0, np.nan)
+
+    # ── AQI momentum (day-over-day change) ─────────────────────────────────
+    # How much AQI jumped from yesterday — captures rapid pollution events
+    df["aqi_diff_1d"]  = shifted.diff(1)    # change from 2 days ago to yesterday
+    df["aqi_diff_7d"]  = shifted.diff(7)    # weekly change momentum
+    df["aqi_pct_1d"]   = shifted.pct_change(1)   # % change (helps normalise for different AQI levels)
+
+    # ── Exponential Moving Average ─────────────────────────────────────────
+    # EMA reacts faster to recent changes than simple rolling mean
+    df["aqi_ema_7d"]  = shifted.ewm(span=7,  adjust=False).mean()
+    df["aqi_ema_14d"] = shifted.ewm(span=14, adjust=False).mean()
 
     # ── Pollutant ratio (PM2.5 / PM10) ────────────────────────────────────
     if "PM2.5" in df.columns and "PM10" in df.columns:
         df["pm_ratio"] = df["PM2.5"] / (df["PM10"].replace(0, np.nan))
 
     # ── Cyclical time encoding ─────────────────────────────────────────────
-    # Encode day-of-week (0=Mon … 6=Sun) and month as sine/cosine pairs so the
-    # model sees the cyclic nature (e.g. Sunday is close to Monday).
-    dow = df.index.dayofweek
+    dow   = df.index.dayofweek
     month = df.index.month
+    woy   = df.index.isocalendar().week.astype(int)
 
-    df["dow_sin"] = np.sin(2 * np.pi * dow / 7)
-    df["dow_cos"] = np.cos(2 * np.pi * dow / 7)
+    df["dow_sin"]  = np.sin(2 * np.pi * dow / 7)
+    df["dow_cos"]  = np.cos(2 * np.pi * dow / 7)
     df["month_sin"] = np.sin(2 * np.pi * (month - 1) / 12)
     df["month_cos"] = np.cos(2 * np.pi * (month - 1) / 12)
+    df["woy_sin"]  = np.sin(2 * np.pi * (woy - 1) / 52)
+    df["woy_cos"]  = np.cos(2 * np.pi * (woy - 1) / 52)
 
-    # ── Boolean season flags (northern India) ─────────────────────────────
-    df["is_winter"] = month.isin([11, 12, 1, 2]).astype(int)
-    df["is_summer"] = month.isin([3, 4, 5]).astype(int)
+    # ── Boolean flags ──────────────────────────────────────────────────────
+    df["is_winter"]  = month.isin([11, 12, 1, 2]).astype(int)
+    df["is_summer"]  = month.isin([3, 4, 5]).astype(int)
     df["is_monsoon"] = month.isin([6, 7, 8, 9]).astype(int)
+    df["is_weekend"] = (dow >= 5).astype(int)  # Sat=5, Sun=6
 
-    # ── Day of year (normalised 0–1) ───────────────────────────────────────
-    df["day_of_year_norm"] = (df.index.dayofyear - 1) / 364.0
+    # Festive + crop-burning season (Oct–Nov) — AQI spikes 3-5x due to stubble burning
+    df["is_festive_season"] = month.isin([10, 11]).astype(int)
+
+    # ── Day of year (normalised 0–1, handles leap years) ──────────────────
+    df["day_of_year_norm"] = np.clip((df.index.dayofyear - 1) / 365.25, 0.0, 1.0)
 
     logger.info("Engineered %d features total", df.shape[1])
     return df
@@ -215,12 +244,18 @@ def split_X_y(df: pd.DataFrame):
     return X, y, feature_cols
 
 
-def train_test_split_temporal(df: pd.DataFrame, test_days: int = 90):
+def train_test_split_temporal(df: pd.DataFrame, test_days: int = None):
     """
     Split into train/test preserving temporal order.
     The most recent `test_days` rows form the test set.
     Never shuffles — that would leak future data into training.
+
+    Defaults to RETRAIN_TEST_DAYS from config.py so the value stays consistent
+    with the configured threshold rather than a hardcoded 90.
     """
+    from config import RETRAIN_TEST_DAYS as _DEFAULT_TEST_DAYS
+    if test_days is None:
+        test_days = _DEFAULT_TEST_DAYS
     split_idx = len(df) - test_days
     train = df.iloc[:split_idx]
     test  = df.iloc[split_idx:]

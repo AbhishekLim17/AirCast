@@ -1,8 +1,8 @@
 # Streamlit Cloud + general dashboard deps
 pandas>=2.2.3
 numpy>=2.0.0
-scikit-learn>=1.5.2
 xgboost>=2.1.0
+optuna>=3.6.1
 joblib>=1.4.2
 
 supabase>=2.5.0

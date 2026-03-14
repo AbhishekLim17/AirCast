@@ -1,9 +1,9 @@
 name: AirCast Daily Job
 
 on:
-  # Runs every day at 06:00 UTC (11:30 AM IST)
+  # Runs every day at 23:30 UTC = 5:00 AM IST (next day)
   schedule:
-    - cron: "0 6 * * *"
+    - cron: "30 23 * * *"
 
   # Allow manual trigger from GitHub Actions UI for testing
   workflow_dispatch:

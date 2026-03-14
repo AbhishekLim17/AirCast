@@ -7,6 +7,8 @@ Usage (standalone test):
 """
 
 import logging
+import json
+import time
 import requests
 from datetime import date, timedelta
 from typing import Optional
@@ -43,14 +45,27 @@ def fetch_current_aqi(station: str) -> Optional[dict]:
     url = f"{WAQI_BASE_URL}/feed/{station}/"
     params = {"token": WAQI_API_TOKEN}
 
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        logger.error("HTTP error fetching station '%s': %s", station, exc)
+    last_exc: Exception | None = None
+    for attempt in range(1, 4):  # 3 attempts with exponential backoff
+        try:
+            response = requests.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            payload = response.json()
+            break  # success
+        except requests.RequestException as exc:
+            last_exc = exc
+            logger.warning(
+                "HTTP error fetching station '%s' (attempt %d/3): %s",
+                station, attempt, exc,
+            )
+            if attempt < 3:
+                time.sleep(2 ** (attempt - 1))  # 1s, 2s, 4s
+        except (ValueError, json.JSONDecodeError) as exc:
+            logger.error("Invalid JSON response from station '%s': %s", station, exc)
+            return None
+    else:
+        logger.error("All 3 attempts failed for station '%s': %s", station, last_exc)
         return None
-
-    payload = response.json()
 
     if payload.get("status") != "ok":
         logger.warning("WAQI returned status '%s' for station '%s'", payload.get("status"), station)
@@ -59,10 +74,16 @@ def fetch_current_aqi(station: str) -> Optional[dict]:
     data = payload["data"]
     iaqi = data.get("iaqi", {})
 
-    # AQI value
+    # AQI value — can be "-", None, or a numeric string
     raw_aqi = data.get("aqi")
     if raw_aqi == "-" or raw_aqi is None:
         logger.warning("No AQI value for station '%s'", station)
+        return None
+
+    try:
+        aqi_float = float(raw_aqi)
+    except (ValueError, TypeError) as exc:
+        logger.warning("Invalid AQI value '%s' for station '%s': %s", raw_aqi, station, exc)
         return None
 
     # Observation date — WAQI returns "YYYY-MM-DD" or a datetime string
@@ -77,7 +98,7 @@ def fetch_current_aqi(station: str) -> Optional[dict]:
     return {
         "station":            station,
         "date":               obs_date,
-        "aqi":                float(raw_aqi),
+        "aqi":                aqi_float,
         "dominant_pollutant": data.get("dominentpol"),
         "pm25":               _iaqi_val(iaqi, "pm25"),
         "pm10":               _iaqi_val(iaqi, "pm10"),
@@ -112,8 +133,9 @@ def fetch_all_stations() -> list[dict]:
 def fetch_yesterday_aqi(station: str) -> Optional[dict]:
     """
     Attempt to retrieve yesterday's AQI for a station.
-    WAQI free tier returns the most recent reading — if it matches yesterday's date
-    it's returned, otherwise we return the current reading as best-effort.
+    WAQI free tier returns the most recent reading available.
+    If the most recent reading is NOT yesterday's, returns None to skip this read
+    (rather than fabricating a historical record).
     """
     reading = fetch_current_aqi(station)
     if reading is None:
@@ -121,12 +143,11 @@ def fetch_yesterday_aqi(station: str) -> Optional[dict]:
 
     yesterday = date.today() - timedelta(days=1)
     if reading["date"] != yesterday:
-        logger.debug(
-            "Station '%s' returned date %s, expected %s — using as best-effort",
+        logger.warning(
+            "Most recent reading from '%s' is %s, not %s (yesterday). Skipping.",
             station, reading["date"], yesterday,
         )
-        # Override the date to yesterday so the DB upsert targets the right row
-        reading = {**reading, "date": yesterday}
+        return None  # Don't fabricate historical data
 
     return reading
 

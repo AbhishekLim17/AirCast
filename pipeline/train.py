@@ -25,14 +25,14 @@ import numpy as np
 import xgboost as xgb
 import optuna
 
-from config import OPTUNA_TRIALS, CV_FOLDS, RETRAIN_WINDOW_DAYS
+from config import OPTUNA_TRIALS, CV_FOLDS, RETRAIN_WINDOW_DAYS, RETRAIN_TEST_DAYS
 from pipeline.preprocess import (
     load_processed, split_X_y, train_test_split_temporal, get_feature_columns,
 )
 from pipeline.evaluate import compute_metrics
 from pipeline.model_store import save_local, push_model
 
-warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=UserWarning, module="xgboost")
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 logger = logging.getLogger(__name__)
@@ -46,10 +46,20 @@ def walk_forward_cv(X: np.ndarray, y: np.ndarray,
     Time-series walk-forward CV — never shuffles, never leaks future data.
 
     Each fold trains on everything before the validation window and evaluates
-    on the next chunk. Returns averaged MAE/RMSE/MAPE across all folds.
+    on the next chunk. Uses early stopping to prevent overfitting even with
+    large n_estimators. Returns averaged MAE/RMSE/MAPE across all folds.
     """
     fold_size = len(X) // (n_folds + 1)
+    if fold_size < 2:
+        raise ValueError(
+            f"Not enough data for {n_folds}-fold CV: {len(X)} samples, "
+            f"need at least {2 * (n_folds + 1)}"
+        )
     maes, rmses, mapes = [], [], []
+
+    # Extract early stopping rounds (not a model param)
+    early_stop = params.pop("early_stopping_rounds", 50)
+    n_est = params.get("n_estimators", 500)
 
     for fold in range(n_folds):
         train_end = fold_size * (fold + 1)
@@ -59,21 +69,29 @@ def walk_forward_cv(X: np.ndarray, y: np.ndarray,
         X_val, y_val = X[train_end:val_end], y[train_end:val_end]
 
         model = xgb.XGBRegressor(**params, verbosity=0, random_state=42)
-        model.fit(X_tr, y_tr)
+        model.fit(
+            X_tr, y_tr,
+            eval_set=[(X_val, y_val)],
+            verbose=False,
+        )
         preds = model.predict(X_val)
 
         m = compute_metrics(y_val, preds)
         maes.append(m["mae"])
         rmses.append(m["rmse"])
-        mapes.append(m["mape"])
+        if m["mape"] is not None:
+            mapes.append(m["mape"])
 
-        logger.debug("  Fold %d/%d — MAE=%.2f  RMSE=%.2f  MAPE=%.2f%%",
-                     fold + 1, n_folds, m["mae"], m["rmse"], m["mape"])
+        logger.debug("  Fold %d/%d — MAE=%.2f  RMSE=%.2f",
+                     fold + 1, n_folds, m["mae"], m["rmse"])
+
+    # Re-insert early stopping so the dict stays intact for the caller
+    params["early_stopping_rounds"] = early_stop
 
     return {
         "mae":  float(np.mean(maes)),
         "rmse": float(np.mean(rmses)),
-        "mape": float(np.mean(mapes)),
+        "mape": float(np.mean(mapes)) if mapes else None,
     }
 
 
@@ -82,15 +100,27 @@ def walk_forward_cv(X: np.ndarray, y: np.ndarray,
 def _make_objective(X_train: np.ndarray, y_train: np.ndarray, n_folds: int):
     def objective(trial: optuna.Trial) -> float:
         params = {
-            "n_estimators":      trial.suggest_int("n_estimators", 100, 800),
-            "max_depth":         trial.suggest_int("max_depth", 3, 9),
-            "learning_rate":     trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-            "subsample":         trial.suggest_float("subsample", 0.6, 1.0),
-            "colsample_bytree":  trial.suggest_float("colsample_bytree", 0.5, 1.0),
-            "min_child_weight":  trial.suggest_int("min_child_weight", 1, 10),
-            "reg_alpha":         trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
-            "reg_lambda":        trial.suggest_float("reg_lambda", 1e-4, 10.0, log=True),
-            "tree_method":       "hist",
+            # ── Tree structure ──
+            "n_estimators":           trial.suggest_int("n_estimators", 200, 2000),
+            "max_depth":              trial.suggest_int("max_depth", 3, 12),
+            "max_leaves":             trial.suggest_int("max_leaves", 0, 256),  # 0 = unlimited
+            "grow_policy":            trial.suggest_categorical("grow_policy", ["depthwise", "lossguide"]),
+            # ── Learning ──
+            "learning_rate":          trial.suggest_float("learning_rate", 0.005, 0.3, log=True),
+            "gamma":                  trial.suggest_float("gamma", 1e-5, 5.0, log=True),
+            "min_child_weight":       trial.suggest_int("min_child_weight", 1, 15),
+            # ── Sampling (anti-overfitting) ──
+            "subsample":              trial.suggest_float("subsample", 0.5, 1.0),
+            "colsample_bytree":       trial.suggest_float("colsample_bytree", 0.4, 1.0),
+            "colsample_bylevel":      trial.suggest_float("colsample_bylevel", 0.4, 1.0),
+            # ── Regularisation ──
+            "reg_alpha":              trial.suggest_float("reg_alpha", 1e-5, 20.0, log=True),
+            "reg_lambda":             trial.suggest_float("reg_lambda", 1e-5, 20.0, log=True),
+            # ── Early stopping ──
+            "early_stopping_rounds":  trial.suggest_int("early_stopping_rounds", 20, 80),
+            # ── Fixed ──
+            "tree_method":            "hist",
+            "objective":              "reg:squarederror",
         }
         cv_results = walk_forward_cv(X_train, y_train, n_folds=n_folds, params=params)
         return cv_results["mae"]   # minimise MAE
@@ -127,8 +157,14 @@ def train(n_trials: int = OPTUNA_TRIALS,
         df = df.iloc[-window_days:]
         logger.info("Retraining on last %d rows", len(df))
 
-    # ── Temporal train/test split (test = last 90 days) ───────────────────
-    train_df, test_df = train_test_split_temporal(df, test_days=90)
+    # ── Temporal train/test split ──────────────────────────────────────────
+    test_days = min(RETRAIN_TEST_DAYS, len(df) // 3)  # never use more than 1/3 for test
+    if test_days < 7:
+        raise RuntimeError(
+            f"Not enough data to split: {len(df)} rows, need at least 21. "
+            "Increase RETRAIN_WINDOW_DAYS or gather more data."
+        )
+    train_df, test_df = train_test_split_temporal(df, test_days=test_days)
     X_train, y_train, feature_cols = split_X_y(train_df)
     X_test,  y_test,  _            = split_X_y(test_df)
 
@@ -151,16 +187,26 @@ def train(n_trials: int = OPTUNA_TRIALS,
 
     # ── Train final model on full training window ──────────────────────────
     logger.info("Training final model on full training window …")
-    final_model = xgb.XGBRegressor(**best_params, verbosity=0, random_state=42)
-    final_model.fit(X_train, y_train)
+    # early_stopping_rounds is not an XGBRegressor constructor param — extract it
+    final_params = {**best_params}
+    final_params["tree_method"] = "hist"
+    es_rounds = final_params.pop("early_stopping_rounds", 50)
+
+    final_model = xgb.XGBRegressor(**final_params, verbosity=0, random_state=42)
+    final_model.fit(
+        X_train, y_train,
+        eval_set=[(X_test, y_test)],
+        verbose=False,
+    )
 
     # ── Evaluate on held-out test set ─────────────────────────────────────
     test_preds = final_model.predict(X_test)
     test_metrics = compute_metrics(y_test, test_preds)
 
+    mape_str = f"{test_metrics['mape']:.2f}%" if test_metrics["mape"] is not None else "N/A"
     logger.info(
-        "Test set — MAE: %.2f  RMSE: %.2f  MAPE: %.2f%%",
-        test_metrics["mae"], test_metrics["rmse"], test_metrics["mape"],
+        "Test set — MAE: %.2f  RMSE: %.2f  MAPE: %s",
+        test_metrics["mae"], test_metrics["rmse"], mape_str,
     )
 
     # ── Feature importance (top 10) ───────────────────────────────────────

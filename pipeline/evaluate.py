@@ -38,11 +38,13 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     # MAPE: avoid division by zero — skip rows where actual AQI is 0
     nonzero = y_true != 0
     if nonzero.sum() == 0:
-        mape = float("nan")
+        mape = None  # Cannot compute MAPE if all actual values are 0
+        logger.warning("MAPE undefined: all actual AQI values are 0")
     else:
         mape = float(np.mean(np.abs((y_true[nonzero] - y_pred[nonzero]) / y_true[nonzero])) * 100)
 
-    logger.info("Metrics — MAE: %.2f  RMSE: %.2f  MAPE: %.2f%%", mae, rmse, mape)
+    mape_display = f"{mape:.2f}%" if mape is not None else "N/A"
+    logger.info("Metrics — MAE: %.2f  RMSE: %.2f  MAPE: %s", mae, rmse, mape_display)
     return {"mae": mae, "rmse": rmse, "mape": mape}
 
 

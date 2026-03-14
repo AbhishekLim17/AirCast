@@ -24,6 +24,11 @@ logger = logging.getLogger(__name__)
 @lru_cache(maxsize=1)
 def get_client() -> Client:
     """Return a cached Supabase client (created once per process)."""
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise EnvironmentError(
+            "SUPABASE_URL and SUPABASE_KEY must be set before calling get_client(). "
+            "Check your .env file or GitHub Actions Secrets."
+        )
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
@@ -165,7 +170,7 @@ def log_performance(eval_date: date, model_ver: str, mae: float, rmse: float,
         "model_ver":           model_ver,
         "mae":                 round(mae, 4),
         "rmse":                round(rmse, 4),
-        "mape":                round(mape, 4),
+        "mape":                round(mape, 4) if mape is not None else None,
         "retrain_triggered":   retrain_triggered,
         "retrain_reason":      retrain_reason,
         "new_model_ver":       new_model_ver,
@@ -222,16 +227,18 @@ def get_latest_model_version() -> Optional[str]:
 def get_joined_chart_data(days: int = 30, station: str = "ahmedabad") -> list[dict]:
     """
     Return a merged list of {date, predicted, actual_aqi} for the dashboard chart.
-    Only dates where both values exist are included.
+    Uses a LEFT JOIN on predictions — every prediction date is included, with
+    actual_aqi set to None when the actual hasn't been recorded yet.
+    This prevents data gaps from silently disappearing off the chart.
     """
     predictions = {r["date"]: r["predicted"] for r in get_predictions(days, station)}
     actuals     = {r["date"]: r["actual_aqi"] for r in get_actuals(days, station)}
 
     merged = []
-    for d in sorted(set(predictions) | set(actuals)):
+    for d in sorted(predictions):  # All prediction dates, not just the intersection
         merged.append({
             "date":       d,
-            "predicted":  predictions.get(d),
-            "actual_aqi": actuals.get(d),
+            "predicted":  predictions[d],
+            "actual_aqi": actuals.get(d),  # None when actual not yet available
         })
     return merged

@@ -34,6 +34,7 @@ from config import (
     RETRAIN_MAE_THRESHOLD,
     LAG_DAYS as FEATURE_LAGS,
     ROLLING_WINDOWS,
+    validate_config,
 )
 from pipeline.fetch_data import fetch_current_aqi, fetch_yesterday_aqi
 from pipeline.db import (
@@ -61,6 +62,10 @@ logger = logging.getLogger(__name__)
 
 EVAL_WINDOW_DAYS = 7   # number of recent days used to decide retraining
 
+# Validate all required env vars early so we fail with a clear message
+# rather than hitting cryptic HTTP 401s deep inside the pipeline.
+validate_config()
+
 
 # ─── Step helpers ─────────────────────────────────────────────────────────────
 
@@ -78,7 +83,8 @@ def step_fetch_actual(yesterday: date, dry_run: bool) -> float | None:
         return None
 
     actual_aqi = float(data.get("aqi") or data.get("value", 0))
-    dominant   = data.get("dominentpol", "unknown")
+    # BUG-FIX: fetch_current_aqi returns key "dominant_pollutant", not "dominentpol"
+    dominant   = data.get("dominant_pollutant", "unknown")
 
     logger.info("  Actual AQI for %s: %.1f (dominant: %s)", yesterday, actual_aqi, dominant)
 
@@ -121,9 +127,10 @@ def step_evaluate(
     logger.info("━━ Step 3: Evaluate accuracy ━━")
 
     m = compute_metrics(np.array([actual]), np.array([predicted]))
+    mape_str = f"{m['mape']:.2f}%" if m["mape"] is not None else "N/A"
     logger.info(
-        "  Point MAE: %.2f  RMSE: %.2f  MAPE: %.2f%%",
-        m["mae"], m["rmse"], m["mape"],
+        "  Point MAE: %.2f  RMSE: %.2f  MAPE: %s",
+        m["mae"], m["rmse"], mape_str,
     )
 
     if not dry_run:
@@ -211,7 +218,8 @@ def step_update_performance_log(
         return
 
     history = get_performance_history(days=2)
-    row = history[0] if history else {}
+    # Use the last (most recent) row — history is ordered ascending by date
+    row = history[-1] if history else {}
 
     log_performance(
         eval_date=yesterday,
@@ -241,7 +249,12 @@ def step_predict_tomorrow(today: date, dry_run: bool) -> float | None:
         return None
 
     model, feature_cols, model_metrics = result
-    model_ver = model_metrics.get("version", "unknown") if isinstance(model_metrics, dict) else "unknown"
+    # BUG-FIX: metadata stores the version under "model_ver", not "version"
+    model_ver = (
+        model_metrics.get("model_ver") or
+        model_metrics.get("version") or
+        "unknown"
+    ) if isinstance(model_metrics, dict) else "unknown"
 
     # Pull last 30 days of actuals to build lag/rolling features
     actuals_rows = get_actuals(station=PRIMARY_STATION, days=35)
@@ -287,21 +300,27 @@ def step_predict_tomorrow(today: date, dry_run: bool) -> float | None:
 # ─── Feature building helpers ─────────────────────────────────────────────────
 
 def _add_temporal_features(feat: dict, target_date: date) -> None:
-    """Inject cyclical and seasonal features for a given date."""
+    """Inject cyclical and seasonal features for a given date — must match preprocess.py exactly."""
     import math
 
     doy  = target_date.timetuple().tm_yday
     dow  = target_date.weekday()          # 0 = Monday
     m    = target_date.month
+    # Week of year (ISO)
+    woy  = target_date.isocalendar()[1]
 
     feat["dow_sin"]          = math.sin(2 * math.pi * dow  / 7)
     feat["dow_cos"]          = math.cos(2 * math.pi * dow  / 7)
     feat["month_sin"]        = math.sin(2 * math.pi * (m - 1) / 12)
     feat["month_cos"]        = math.cos(2 * math.pi * (m - 1) / 12)
-    feat["day_of_year_norm"] = doy / 365.0
+    feat["woy_sin"]          = math.sin(2 * math.pi * (woy - 1) / 52)
+    feat["woy_cos"]          = math.cos(2 * math.pi * (woy - 1) / 52)
+    feat["day_of_year_norm"] = min((doy - 1) / 365.25, 1.0)
     feat["is_winter"]        = int(m in (11, 12, 1, 2))
     feat["is_summer"]        = int(m in (3, 4, 5))
     feat["is_monsoon"]       = int(m in (6, 7, 8, 9))
+    feat["is_weekend"]       = int(dow >= 5)
+    feat["is_festive_season"]= int(m in (10, 11))
 
 
 def _build_features_from_actuals(
@@ -312,9 +331,10 @@ def _build_features_from_actuals(
     """
     Reconstruct the feature vector that would be used to predict tomorrow
     using recent actual AQI values from the DB.
-    """
-    import math
 
+    MUST generate the exact same features as preprocess._engineer_features()
+    so there is zero train/inference skew.
+    """
     # Sort actuals descending by date
     actuals_sorted = sorted(actuals, key=lambda r: r["date"], reverse=True)
     aqi_series = [float(r["actual_aqi"]) for r in actuals_sorted]
@@ -322,25 +342,61 @@ def _build_features_from_actuals(
     feat: dict = {}
     target_date = today + timedelta(days=1)
 
-    # Current (today's) AQI is the most recent reading
+    # Current (today's) AQI — most recent reading
     current = aqi_series[0] if aqi_series else 100.0
 
-    # Raw pollutants — we only have AQI in actuals; set pollutants to 0 unless available
-    for col in ["PM2.5", "PM10", "NO", "NO2", "NOx", "NH3", "SO2", "CO", "O3", "Benzene", "Toluene", "Xylene"]:
-        feat[col] = actuals_sorted[0].get(col, 0.0) if actuals_sorted else 0.0
-
-    # Lag features
+    # ── Lag features ───────────────────────────────────────────────────────
     for lag in FEATURE_LAGS:
         feat[f"aqi_lag_{lag}d"] = aqi_series[lag - 1] if len(aqi_series) >= lag else current
 
-    # Rolling means
+    # ── Rolling statistics (mean / std / min / max) ────────────────────────
     for window in ROLLING_WINDOWS:
         window_vals = aqi_series[:window]
-        feat[f"aqi_roll_{window}d"] = float(np.mean(window_vals)) if window_vals else current
+        if window_vals:
+            v = np.array(window_vals, dtype=float)
+            feat[f"aqi_roll_{window}d"] = float(np.mean(v))
+            feat[f"aqi_rstd_{window}d"] = float(np.std(v, ddof=1)) if len(v) > 1 else 0.0
+            feat[f"aqi_rmin_{window}d"] = float(np.min(v))
+            feat[f"aqi_rmax_{window}d"] = float(np.max(v))
+        else:
+            feat[f"aqi_roll_{window}d"] = current
+            feat[f"aqi_rstd_{window}d"] = 0.0
+            feat[f"aqi_rmin_{window}d"] = current
+            feat[f"aqi_rmax_{window}d"] = current
 
-    # pm_ratio: PM2.5/PM10 (default 0.5 if unknown)
-    feat["pm_ratio"] = (feat["PM2.5"] / feat["PM10"]) if feat.get("PM10", 0) > 0 else 0.5
+    # ── Volatility ratio (7-day range / mean) ──────────────────────────────
+    v7 = np.array(aqi_series[:7], dtype=float) if len(aqi_series) >= 3 else np.array([current])
+    v7_mean = float(np.mean(v7))
+    feat["aqi_volatility_7d"] = float((np.max(v7) - np.min(v7)) / v7_mean) if v7_mean > 0 else 0.0
 
+    # ── AQI momentum (day-over-day change) ─────────────────────────────────
+    if len(aqi_series) >= 2:
+        feat["aqi_diff_1d"] = aqi_series[0] - aqi_series[1]
+        feat["aqi_pct_1d"]  = feat["aqi_diff_1d"] / aqi_series[1] if aqi_series[1] != 0 else 0.0
+    else:
+        feat["aqi_diff_1d"] = 0.0
+        feat["aqi_pct_1d"]  = 0.0
+
+    if len(aqi_series) >= 8:
+        feat["aqi_diff_7d"] = aqi_series[0] - aqi_series[7]
+    else:
+        feat["aqi_diff_7d"] = 0.0
+
+    # ── Exponential Moving Average ─────────────────────────────────────────
+    if aqi_series:
+        # Compute EMA manually over the reversed series (oldest first)
+        rev = list(reversed(aqi_series))
+        for span, label in [(7, "aqi_ema_7d"), (14, "aqi_ema_14d")]:
+            alpha = 2 / (span + 1)
+            ema = rev[0]
+            for val in rev[1:]:
+                ema = alpha * val + (1 - alpha) * ema
+            feat[label] = ema
+    else:
+        feat["aqi_ema_7d"]  = current
+        feat["aqi_ema_14d"] = current
+
+    # ── Temporal / cyclical features ───────────────────────────────────────
     _add_temporal_features(feat, target_date)
     return feat
 
