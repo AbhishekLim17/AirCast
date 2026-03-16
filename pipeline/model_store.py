@@ -141,6 +141,7 @@ def _read_bundle_local():
 
 def _download_from_hub():
     """Download model files from HF Hub, cache them, and return the bundle."""
+    import shutil
     import xgboost as xgb
     from huggingface_hub import hf_hub_download
     from config import HF_TOKEN, HF_USERNAME, HF_REPO_NAME
@@ -148,40 +149,44 @@ def _download_from_hub():
     repo_id = f"{HF_USERNAME}/{HF_REPO_NAME}"
     logger.info("Downloading model from %s …", repo_id)
 
-    try:
-        # Download model binary
-        model_path = hf_hub_download(
-            repo_id=repo_id,
-            filename="model.bin",
-            token=HF_TOKEN,
-        )
-        # Download metadata
-        meta_path = hf_hub_download(
-            repo_id=repo_id,
-            filename="metadata.json",
-            token=HF_TOKEN,
-        )
+    _LOCAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-        # Cache both files locally
-        _LOCAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        import shutil
+    # ── Try new format first (model.bin + metadata.json) ──────────────────
+    try:
+        model_path = hf_hub_download(repo_id=repo_id, filename="model.bin", token=HF_TOKEN)
+        meta_path  = hf_hub_download(repo_id=repo_id, filename="metadata.json", token=HF_TOKEN)
+
         shutil.copy(model_path, _LOCAL_MODEL)
         shutil.copy(meta_path,  _LOCAL_META)
         logger.info("Model cached at %s", _LOCAL_CACHE_DIR)
 
-        # Load from cache using XGBRegressor (sklearn API)
         model = xgb.XGBRegressor()
         model.load_model(str(_LOCAL_MODEL))
-
         with open(_LOCAL_META, "r") as f:
             meta = json.load(f)
-
         return model, meta["feature_cols"], meta.get("metrics", {})
+
+    except Exception as exc:
+        logger.warning("New-format model not on HF Hub (%s) — trying legacy pickle …", exc)
+
+    # ── Fallback: legacy pickle bundle (xgb_model.pkl) ────────────────────
+    try:
+        import pickle
+        pkl_path = hf_hub_download(repo_id=repo_id, filename="xgb_model.pkl", token=HF_TOKEN)
+        shutil.copy(pkl_path, _LOCAL_CACHE_DIR / "xgb_model.pkl")
+
+        with open(pkl_path, "rb") as f:
+            bundle = pickle.load(f)
+        model        = bundle["model"]
+        feature_cols = bundle["feature_cols"]
+        metrics      = bundle.get("metrics", {})
+        logger.info("Loaded legacy pickle model — re-push with pipeline/train.py --push to upgrade")
+        return model, feature_cols, metrics
 
     except Exception as exc:
         raise FileNotFoundError(
             f"Could not load model from HF Hub ({repo_id}): {exc}\n"
-            "Run pipeline/train.py first to train and push the initial model."
+            "Run pipeline/train.py --push first to train and push the initial model."
         ) from exc
 
 
