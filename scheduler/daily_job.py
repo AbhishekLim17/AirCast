@@ -275,7 +275,20 @@ def step_predict_tomorrow(today: date, dry_run: bool) -> float | None:
     else:
         feat_values = _build_features_from_actuals(actuals_rows, today, feature_cols)
 
-    # Convert to numpy row
+    # ── Safety check: detect train/inference feature mismatch ──────────────
+    built_keys = set(feat_values.keys())
+    model_keys = set(feature_cols)
+    missing = model_keys - built_keys
+    extra   = built_keys - model_keys
+    if missing:
+        logger.error("FEATURE MISMATCH: model expects %d features that inference didn't build: %s",
+                     len(missing), sorted(missing))
+        logger.error("These will default to 0.0 — predictions WILL be wrong!")
+    if extra:
+        logger.warning("Inference built %d extra features not used by model: %s",
+                       len(extra), sorted(extra))
+
+    # Convert to numpy row (model's feature_cols order)
     X = np.array([[feat_values.get(col, 0.0) for col in feature_cols]])
     predicted_aqi = float(model.predict(X)[0])
     predicted_aqi = max(0.0, round(predicted_aqi, 1))

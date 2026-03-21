@@ -11,6 +11,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 from datetime import date, timedelta
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -288,40 +289,61 @@ html, body, [class*="css"] {{ font-family: 'Inter', sans-serif !important; }}
     padding-top: 0 !important;
 }}
 
-/* ── Sidebar re-open button — MUST always remain visible & clickable ─────── */
-/* Handles both expanded (collapse arrow) and collapsed (re-open arrow) */
+/* ── Sidebar collapse button (visible inside sidebar) ───────────────────── */
 button[data-testid="stSidebarNavCollapseButton"],
-button[data-testid="stSidebarNavExpandButton"],
-[data-testid="stSidebarCollapsedControl"],
-[data-testid="collapsedControl"] {{
+button[data-testid="stSidebarNavExpandButton"] {{
     visibility: visible !important;
-    display: flex !important;
     opacity: 1 !important;
     pointer-events: all !important;
-    z-index: 999999 !important;
-    position: relative !important;
 }}
-/* Style the expand button when sidebar is collapsed */
+
+/* ── Sidebar expand button (fixed hamburger at top-left when collapsed) ──── */
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="collapsedControl"] {{
+    position: fixed !important;
+    top: 10px !important;
+    left: 10px !important;
+    z-index: 9999999 !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+    pointer-events: all !important;
+}}
 [data-testid="stSidebarCollapsedControl"] button,
 [data-testid="collapsedControl"] button {{
-    background: {theme["glass"]} !important;
-    backdrop-filter: blur(20px) saturate(180%) !important;
-    -webkit-backdrop-filter: blur(20px) saturate(180%) !important;
-    border: 1.5px solid {theme["accent"]} !important;
-    border-radius: 0 14px 14px 0 !important;
-    box-shadow: 4px 0 24px rgba(99,102,241,0.25) !important;
-    padding: 18px 10px !important;
-    color: {theme["accent"]} !important;
-    transition: all 0.2s ease !important;
+    background: {theme["accent"]} !important;
+    border: none !important;
+    border-radius: 10px !important;
+    padding: 8px 14px !important;
+    color: #ffffff !important;
+    font-size: 17px !important;
+    font-weight: 700 !important;
+    line-height: 1 !important;
+    cursor: pointer !important;
+    box-shadow: 0 3px 14px rgba(99,102,241,0.45) !important;
+    transition: all 0.18s ease !important;
+    min-width: unset !important;
+    min-height: unset !important;
+    width: auto !important;
     height: auto !important;
-    min-height: 52px !important;
-    min-width: 32px !important;
 }}
 [data-testid="stSidebarCollapsedControl"] button:hover,
 [data-testid="collapsedControl"] button:hover {{
-    background: rgba(99,102,241,0.15) !important;
-    box-shadow: 4px 0 32px rgba(99,102,241,0.35) !important;
-    transform: scale(1.05);
+    background: rgba(99,102,241,0.85) !important;
+    box-shadow: 0 5px 20px rgba(99,102,241,0.55) !important;
+    transform: scale(1.07) !important;
+}}
+/* Hide any SVG icon inside the button so "☰" text shows cleanly */
+[data-testid="stSidebarCollapsedControl"] button svg,
+[data-testid="collapsedControl"] button svg {{
+    display: none !important;
+}}
+/* Inject ☰ hamburger symbol */
+[data-testid="stSidebarCollapsedControl"] button::after,
+[data-testid="collapsedControl"] button::after {{
+    content: "☰" !important;
+    font-size: 18px !important;
+    color: #ffffff !important;
+    font-family: sans-serif !important;
 }}
 
 /* ── Radio / slider inputs ─────────────────────────────────────────────────── */
@@ -329,6 +351,37 @@ button[data-testid="stSidebarNavExpandButton"],
     background: linear-gradient(90deg,#4f46e5,#7c3aed) !important;
 }}
 div[data-baseweb="radio"] label {{ color: {theme["text"]} !important; }}
+
+/* ── Sidebar toggle switch color ─────────────────────────────────────────── */
+:root {{ --primary-color: {theme["accent"]}; }}
+p, section, [data-testid="stSidebar"] {{ --primary-color: {theme["accent"]}; }}
+/* Off-state track */
+[data-testid="stSidebar"] [role="switch"],
+[data-testid="stSidebar"] [role="checkbox"],
+[data-testid="stSidebar"] [data-baseweb="toggle"] > div {{
+    background-color: rgba(148,163,184,0.35) !important;
+    border-color:     rgba(148,163,184,0.50) !important;
+    border-radius: 12px !important;
+    transition: background-color 0.2s ease !important;
+}}
+/* On-state track — all selector variants */
+[data-testid="stSidebar"] [aria-checked="true"][role="switch"],
+[data-testid="stSidebar"] [aria-checked="true"][role="checkbox"],
+[data-testid="stSidebar"] input[type="checkbox"]:checked ~ [role="switch"],
+[data-testid="stSidebar"] input[type="checkbox"]:checked ~ [role="checkbox"],
+[data-testid="stSidebar"] input[type="checkbox"]:checked + div,
+[data-testid="stSidebar"] label:has(input:checked) [role="switch"],
+[data-testid="stSidebar"] label:has(input:checked) [role="checkbox"] {{
+    background-color: {theme["accent"]} !important;
+    border-color:     {theme["accent"]} !important;
+}}
+/* Thumb */
+[data-testid="stSidebar"] [role="switch"] > div,
+[data-testid="stSidebar"] [role="checkbox"] > div {{
+    background-color: #ffffff !important;
+    border-radius: 50% !important;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.25) !important;
+}}
 
 /* ── Buttons ───────────────────────────────────────────────────────────────── */
 div[data-testid="stButton"] button {{
@@ -382,6 +435,72 @@ hr {{ border-color: rgba(99,102,241,0.15) !important; margin: 10px 0 !important;
 """
 
 st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
+
+# ─── Sidebar arrow toggle ────────────────────────────────────────────────────
+_sb_col, _ = st.columns([0.022, 0.978])
+with _sb_col:
+    components.html(f"""
+    <style>
+        * {{ margin:0; padding:0; box-sizing:border-box; }}
+        html, body {{ background:transparent; overflow:hidden; height:48px; }}
+        #arw {{
+            width:20px; height:48px;
+            background:rgba(148,163,184,0.10);
+            color:{theme["muted"]};
+            border:1px solid rgba(148,163,184,0.35);
+            border-radius:6px;
+            font-size:14px; font-weight:700;
+            cursor:pointer; line-height:1;
+            font-family:sans-serif;
+            display:flex; align-items:center; justify-content:center;
+            transition:all 0.15s ease;
+            user-select:none;
+        }}
+        #arw:hover {{
+            background:rgba(148,163,184,0.25);
+            color:{theme["text"]};
+            border-color:rgba(148,163,184,0.60);
+        }}
+    </style>
+    <button id="arw" onclick="doToggle()" title="Toggle Sidebar">&#8250;</button>
+    <script>
+    function isSidebarOpen() {{
+        var p = window.parent.document;
+        var sb = p.querySelector('section[data-testid="stSidebar"]');
+        return sb && sb.getBoundingClientRect().width > 80;
+    }}
+    function updateArrow() {{
+        document.getElementById('arw').innerHTML = isSidebarOpen() ? '&#8249;' : '&#8250;';
+    }}
+    function doToggle() {{
+        var p = window.parent.document;
+        var SELS = [
+            '[data-testid="stSidebarNavCollapseButton"]',
+            '[data-testid="collapsedControl"] button',
+            '[data-testid="stSidebarCollapsedControl"] button',
+            '[data-testid="stSidebarNavExpandButton"]',
+            'section[data-testid="stSidebar"] button',
+        ];
+        for (var i = 0; i < SELS.length; i++) {{
+            var el = p.querySelector(SELS[i]);
+            if (el) {{
+                el.dispatchEvent(new MouseEvent('click', {{bubbles:true, cancelable:true, view:window.parent}}));
+                setTimeout(updateArrow, 350);
+                return;
+            }}
+        }}
+        var btns = p.querySelectorAll('button');
+        for (var j = 0; j < btns.length; j++) {{
+            if (/sidebar/i.test(btns[j].getAttribute('aria-label') || '')) {{
+                btns[j].dispatchEvent(new MouseEvent('click', {{bubbles:true, cancelable:true, view:window.parent}}));
+                setTimeout(updateArrow, 350);
+                return;
+            }}
+        }}
+    }}
+    setTimeout(updateArrow, 200);
+    </script>
+    """, height=48, scrolling=False)
 
 # ─── Data loaders ─────────────────────────────────────────────────────────────
 
