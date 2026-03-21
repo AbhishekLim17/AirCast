@@ -1020,16 +1020,30 @@ with col_ret:
             retrain_df = perf_df[retrain_mask == True].copy()
 
             if retrain_df.empty:
-                st.markdown(
-                    "<div style='display:flex;align-items:center;gap:12px;padding:18px 0;'>"
-                    "<div style='font-size:32px;'>✅</div>"
-                    f"<div style='font-size:13px;color:{theme['muted']};font-family:Inter,sans-serif;'>"
-                    f"<b style='color:{theme['text']};'>All good!</b><br>"
-                    f"The model's error is within the acceptable limit "
-                    f"(MAE ≤ {RETRAIN_MAE_THRESHOLD} AQI points).<br>"
-                    f"No retraining has been needed so far.</div></div>",
-                    unsafe_allow_html=True,
-                )
+                # Check if latest MAE is ACTUALLY good, not just no-retrain-triggered
+                latest_mae = perf_df["mae"].iloc[-1] if "mae" in perf_df.columns and not perf_df.empty else None
+                if latest_mae is not None and latest_mae > RETRAIN_MAE_THRESHOLD:
+                    st.markdown(
+                        "<div style='display:flex;align-items:center;gap:12px;padding:18px 0;'>"
+                        "<div style='font-size:32px;'>⚠️</div>"
+                        f"<div style='font-size:13px;color:{theme['muted']};font-family:Inter,sans-serif;'>"
+                        f"<b style='color:#f59e0b;'>Accuracy needs attention</b><br>"
+                        f"Latest MAE is <b>{latest_mae:.1f}</b> (threshold: {RETRAIN_MAE_THRESHOLD}).<br>"
+                        f"The model may need retraining. This can happen after a model update "
+                        f"when old predictions are still in the evaluation window.</div></div>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        "<div style='display:flex;align-items:center;gap:12px;padding:18px 0;'>"
+                        "<div style='font-size:32px;'>✅</div>"
+                        f"<div style='font-size:13px;color:{theme['muted']};font-family:Inter,sans-serif;'>"
+                        f"<b style='color:{theme['text']};'>All good!</b><br>"
+                        f"The model's error is within the acceptable limit "
+                        f"(MAE ≤ {RETRAIN_MAE_THRESHOLD} AQI points).<br>"
+                        f"No retraining has been needed so far.</div></div>",
+                        unsafe_allow_html=True,
+                    )
             else:
                 dcols = [c for c in ["eval_date", "mae", "new_mae", "promoted"] if c in retrain_df.columns]
                 st.dataframe(
