@@ -74,13 +74,43 @@ ALTER TABLE actuals           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE model_performance ENABLE ROW LEVEL SECURITY;
 
 -- Anon users: SELECT only
-CREATE POLICY "anon_read_predictions"
-    ON predictions FOR SELECT USING (true);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE schemaname = 'public'
+          AND tablename = 'predictions'
+          AND policyname = 'anon_read_predictions'
+    ) THEN
+        CREATE POLICY "anon_read_predictions"
+            ON predictions FOR SELECT USING (true);
+    END IF;
+END $$;
 
-CREATE POLICY "anon_read_actuals"
-    ON actuals FOR SELECT USING (true);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE schemaname = 'public'
+          AND tablename = 'actuals'
+          AND policyname = 'anon_read_actuals'
+    ) THEN
+        CREATE POLICY "anon_read_actuals"
+            ON actuals FOR SELECT USING (true);
+    END IF;
+END $$;
 
-CREATE POLICY "anon_read_model_performance"
-    ON model_performance FOR SELECT USING (true);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE schemaname = 'public'
+          AND tablename = 'model_performance'
+          AND policyname = 'anon_read_model_performance'
+    ) THEN
+        CREATE POLICY "anon_read_model_performance"
+            ON model_performance FOR SELECT USING (true);
+    END IF;
+END $$;
 
 -- Service role bypasses RLS by default in Supabase — no insert policies needed here.

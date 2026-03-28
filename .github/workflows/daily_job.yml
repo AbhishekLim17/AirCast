@@ -27,14 +27,16 @@ jobs:
         run: pip install -r requirements-actions.txt
 
       - name: Run daily AQI job
-        run: python -m scheduler.daily_job
+        run: |
+          set -o pipefail
+          python -m scheduler.daily_job 2>&1 | tee daily_job.log
 
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: daily-job-logs-${{ github.run_id }}
-          path: "*.log"
+          path: daily_job.log
           retention-days: 7
 
     env:

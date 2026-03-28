@@ -45,6 +45,7 @@ from pipeline.db import (
     log_performance,
     get_performance_history,
     get_latest_model_version,
+    get_joined_chart_data,
 )
 from pipeline.evaluate import compute_metrics, should_retrain
 from pipeline.model_store import load_model, push_model
@@ -74,12 +75,23 @@ def step_fetch_actual(yesterday: date, dry_run: bool) -> float | None:
     logger.info("━━ Step 1: Fetch yesterday's actual AQI (%s) ━━", yesterday)
 
     data = fetch_yesterday_aqi(PRIMARY_STATION)
+    used_fallback = False
     if data is None:
         logger.warning("WAQI returned no data for %s — trying current reading as fallback", yesterday)
         data = fetch_current_aqi(PRIMARY_STATION)
+        used_fallback = True
 
     if data is None:
         logger.error("Could not fetch AQI data from WAQI. Aborting.")
+        return None
+
+    reading_date = data.get("date")
+    if used_fallback and reading_date != yesterday:
+        logger.warning(
+            "Fallback reading is dated %s (expected %s). Skipping write/eval for yesterday to avoid date drift.",
+            reading_date,
+            yesterday,
+        )
         return None
 
     actual_aqi = float(data.get("aqi") or data.get("value", 0))
@@ -100,6 +112,76 @@ def step_fetch_actual(yesterday: date, dry_run: bool) -> float | None:
         logger.info("  [DRY-RUN] Skipped DB write")
 
     return actual_aqi
+
+
+def _recent_prediction_bias(days: int = 21, min_points: int = 7) -> float:
+    """
+    Return mean residual (actual - predicted) over recent joined rows.
+
+    Positive bias means model has been under-predicting; negative means over-predicting.
+    """
+    rows = get_joined_chart_data(days=days, station=PRIMARY_STATION)
+    paired = [
+        r for r in rows
+        if r.get("predicted") is not None and r.get("actual_aqi") is not None
+    ]
+    if len(paired) < min_points:
+        return 0.0
+
+    residuals = [float(r["actual_aqi"]) - float(r["predicted"]) for r in paired]
+    return float(np.mean(residuals))
+
+
+def _calibrate_prediction(raw_pred: float, recent_actuals: list[float]) -> tuple[float, dict]:
+    """
+    Calibrate raw model output against recent observed AQI dynamics.
+
+    This reduces large, systematic over/under-shooting while preserving trend signal.
+    Returns (calibrated_prediction, diagnostics_dict).
+    """
+    pred = float(raw_pred)
+    diag = {
+        "center": None,
+        "alpha": None,
+        "clip_low": None,
+        "clip_high": None,
+    }
+
+    if not recent_actuals:
+        return float(np.clip(pred, 0.0, 500.0)), diag
+
+    vals = np.array(recent_actuals[-21:], dtype=float)
+    center = float(np.median(vals))
+    spread = float(np.std(vals, ddof=1)) if len(vals) > 1 else 0.0
+
+    # Dynamic shrinkage toward recent center.
+    # More recent data -> trust model more. Large deviation -> shrink more.
+    base_alpha = 0.35 + min(len(vals), 21) / 21.0 * 0.35  # 0.35 to 0.70
+    deviation = abs(pred - center)
+    if deviation > max(20.0, 1.5 * max(spread, 1.0)):
+        alpha = base_alpha * 0.6
+    else:
+        alpha = base_alpha
+
+    blended = center + alpha * (pred - center)
+
+    # Keep prediction within a robust recent envelope.
+    q10 = float(np.percentile(vals, 10))
+    q90 = float(np.percentile(vals, 90))
+    margin = max(15.0, 0.35 * max(spread, 1.0))
+    low = q10 - margin
+    high = q90 + margin
+
+    calibrated = float(np.clip(blended, low, high))
+    calibrated = float(np.clip(calibrated, 0.0, 500.0))
+
+    diag.update({
+        "center": round(center, 2),
+        "alpha": round(alpha, 3),
+        "clip_low": round(low, 2),
+        "clip_high": round(high, 2),
+    })
+    return calibrated, diag
 
 
 def step_load_prediction(yesterday: date) -> float | None:
@@ -235,7 +317,11 @@ def step_update_performance_log(
     logger.info("  ✓ Performance row updated with retrain metadata")
 
 
-def step_predict_tomorrow(today: date, dry_run: bool) -> float | None:
+def step_predict_tomorrow(
+    today: date,
+    dry_run: bool,
+    preferred_model_ver: str | None = None,
+) -> float | None:
     """
     Build a feature vector from today's latest AQI + recent actuals,
     run the model, and store the prediction for tomorrow.
@@ -250,11 +336,13 @@ def step_predict_tomorrow(today: date, dry_run: bool) -> float | None:
 
     model, feature_cols, model_metrics = result
     # BUG-FIX: metadata stores the version under "model_ver", not "version"
-    model_ver = (
-        model_metrics.get("model_ver") or
-        model_metrics.get("version") or
-        "unknown"
-    ) if isinstance(model_metrics, dict) else "unknown"
+    model_ver = None
+    if isinstance(model_metrics, dict):
+        model_ver = model_metrics.get("model_ver") or model_metrics.get("version")
+        if not model_ver and model_metrics.get("trained_on"):
+            model_ver = f"local-{model_metrics.get('trained_on')}"
+    if not model_ver:
+        model_ver = preferred_model_ver or get_latest_model_version() or "unknown"
 
     # Pull last 30 days of actuals to build lag/rolling features
     actuals_rows = get_actuals(station=PRIMARY_STATION, days=35)
@@ -269,10 +357,12 @@ def step_predict_tomorrow(today: date, dry_run: bool) -> float | None:
             logger.error("  Could not fetch live AQI — aborting prediction")
             return None
         current_aqi = float(live.get("aqi") or live.get("value", 100))
+        recent_actual_values = [float(r["actual_aqi"]) for r in actuals_rows] + [current_aqi]
         # Minimal feature vector: repeat current AQI for all lag/rolling features
         feat_values = {col: current_aqi for col in feature_cols}
         _add_temporal_features(feat_values, today + timedelta(days=1))
     else:
+        recent_actual_values = [float(r["actual_aqi"]) for r in actuals_rows]
         feat_values = _build_features_from_actuals(actuals_rows, today, feature_cols)
 
     # ── Safety check: detect train/inference feature mismatch ──────────────
@@ -290,11 +380,27 @@ def step_predict_tomorrow(today: date, dry_run: bool) -> float | None:
 
     # Convert to numpy row (model's feature_cols order)
     X = np.array([[feat_values.get(col, 0.0) for col in feature_cols]])
-    predicted_aqi = float(model.predict(X)[0])
-    predicted_aqi = max(0.0, round(predicted_aqi, 1))
+    raw_pred = float(model.predict(X)[0])
+    bias = _recent_prediction_bias(days=21, min_points=7)
+    # Clamp correction so transient spikes don't over-correct the forecast.
+    bias = float(np.clip(bias, -80.0, 80.0))
+    bias_adjusted = float(np.clip(raw_pred + bias, 0.0, 500.0))
 
-    logger.info("  Predicted AQI for %s: %.1f  (model: %s)",
-                today + timedelta(days=1), predicted_aqi, model_ver)
+    calibrated, cal_diag = _calibrate_prediction(bias_adjusted, recent_actual_values)
+    predicted_aqi = round(calibrated, 1)
+
+    logger.info(
+        "  Predicted AQI for %s: %.1f  (raw: %.1f, bias_adj: %.1f, center: %s, alpha: %s, band: [%s, %s], model: %s)",
+        today + timedelta(days=1),
+        predicted_aqi,
+        raw_pred,
+        bias,
+        cal_diag.get("center"),
+        cal_diag.get("alpha"),
+        cal_diag.get("clip_low"),
+        cal_diag.get("clip_high"),
+        model_ver,
+    )
 
     if not dry_run:
         insert_prediction(
@@ -448,7 +554,11 @@ def run(force_retrain: bool = False, dry_run: bool = False) -> None:
             step_update_performance_log(yesterday, old_ver, new_ver, reason, dry_run)
 
     # ── 6. Predict tomorrow ────────────────────────────────────────────────────
-    predicted_tomorrow = step_predict_tomorrow(today, dry_run)
+    predicted_tomorrow = step_predict_tomorrow(
+        today,
+        dry_run,
+        preferred_model_ver=new_ver,
+    )
 
     # ── Summary ────────────────────────────────────────────────────────────────
     logger.info("")

@@ -70,20 +70,14 @@ AQI_CATEGORIES: list[dict] = [
 def get_aqi_category(aqi: float) -> dict:
     """Return the AQI category dict for a given AQI value. Clamps invalid AQI to valid range.
 
-    Uses half-open intervals [min, next_cat_min) so float values like 50.5 are
-    correctly classified as 'Satisfactory' instead of falling into the gap between
-    the integer boundaries used by the CPCB scale.
+    Uses each category's max boundary so float values like 50.5 are
+    classified as 'Satisfactory' (not 'Good').
     """
     # Clamp AQI to valid range [0, 500] to handle edge cases
     aqi = max(0.0, min(float(aqi), 500.0))
 
-    for i, cat in enumerate(AQI_CATEGORIES):
-        # Last category is always the catch-all
-        if i == len(AQI_CATEGORIES) - 1:
-            return cat
-        # Half-open interval: [cat.min, next_cat.min)
-        next_min = AQI_CATEGORIES[i + 1]["min"]
-        if cat["min"] <= aqi < next_min:
+    for cat in AQI_CATEGORIES:
+        if aqi <= cat["max"]:
             return cat
 
     return AQI_CATEGORIES[-1]  # Unreachable, but keeps type-checkers happy

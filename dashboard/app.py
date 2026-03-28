@@ -289,61 +289,12 @@ html, body, [class*="css"] {{ font-family: 'Inter', sans-serif !important; }}
     padding-top: 0 !important;
 }}
 
-/* ── Sidebar collapse button (visible inside sidebar) ───────────────────── */
+/* ── Sidebar expand/collapse: hide native Streamlit controls, JS handles it ── */
 button[data-testid="stSidebarNavCollapseButton"],
-button[data-testid="stSidebarNavExpandButton"] {{
-    visibility: visible !important;
-    opacity: 1 !important;
-    pointer-events: all !important;
-}}
-
-/* ── Sidebar expand button (fixed hamburger at top-left when collapsed) ──── */
+button[data-testid="stSidebarNavExpandButton"],
 [data-testid="stSidebarCollapsedControl"],
 [data-testid="collapsedControl"] {{
-    position: fixed !important;
-    top: 10px !important;
-    left: 10px !important;
-    z-index: 9999999 !important;
-    visibility: visible !important;
-    opacity: 1 !important;
-    pointer-events: all !important;
-}}
-[data-testid="stSidebarCollapsedControl"] button,
-[data-testid="collapsedControl"] button {{
-    background: {theme["accent"]} !important;
-    border: none !important;
-    border-radius: 10px !important;
-    padding: 8px 14px !important;
-    color: #ffffff !important;
-    font-size: 17px !important;
-    font-weight: 700 !important;
-    line-height: 1 !important;
-    cursor: pointer !important;
-    box-shadow: 0 3px 14px rgba(99,102,241,0.45) !important;
-    transition: all 0.18s ease !important;
-    min-width: unset !important;
-    min-height: unset !important;
-    width: auto !important;
-    height: auto !important;
-}}
-[data-testid="stSidebarCollapsedControl"] button:hover,
-[data-testid="collapsedControl"] button:hover {{
-    background: rgba(99,102,241,0.85) !important;
-    box-shadow: 0 5px 20px rgba(99,102,241,0.55) !important;
-    transform: scale(1.07) !important;
-}}
-/* Hide any SVG icon inside the button so "☰" text shows cleanly */
-[data-testid="stSidebarCollapsedControl"] button svg,
-[data-testid="collapsedControl"] button svg {{
     display: none !important;
-}}
-/* Inject ☰ hamburger symbol */
-[data-testid="stSidebarCollapsedControl"] button::after,
-[data-testid="collapsedControl"] button::after {{
-    content: "☰" !important;
-    font-size: 18px !important;
-    color: #ffffff !important;
-    font-family: sans-serif !important;
 }}
 
 /* ── Radio / slider inputs ─────────────────────────────────────────────────── */

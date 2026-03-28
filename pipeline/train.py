@@ -57,9 +57,9 @@ def walk_forward_cv(X: np.ndarray, y: np.ndarray,
         )
     maes, rmses, mapes = [], [], []
 
-    # Extract early stopping rounds (not a model param)
-    early_stop = params.pop("early_stopping_rounds", 50)
-    n_est = params.get("n_estimators", 500)
+    # Keep the caller params immutable across folds/trials.
+    cv_params = {**params}
+    # Keep early_stopping_rounds in constructor for compatibility with this xgboost API.
 
     for fold in range(n_folds):
         train_end = fold_size * (fold + 1)
@@ -68,7 +68,7 @@ def walk_forward_cv(X: np.ndarray, y: np.ndarray,
         X_tr, y_tr = X[:train_end], y[:train_end]
         X_val, y_val = X[train_end:val_end], y[train_end:val_end]
 
-        model = xgb.XGBRegressor(**params, verbosity=0, random_state=42)
+        model = xgb.XGBRegressor(**cv_params, verbosity=0, random_state=42)
         model.fit(
             X_tr, y_tr,
             eval_set=[(X_val, y_val)],
@@ -84,9 +84,6 @@ def walk_forward_cv(X: np.ndarray, y: np.ndarray,
 
         logger.debug("  Fold %d/%d — MAE=%.2f  RMSE=%.2f",
                      fold + 1, n_folds, m["mae"], m["rmse"])
-
-    # Re-insert early stopping so the dict stays intact for the caller
-    params["early_stopping_rounds"] = early_stop
 
     return {
         "mae":  float(np.mean(maes)),
@@ -187,10 +184,9 @@ def train(n_trials: int = OPTUNA_TRIALS,
 
     # ── Train final model on full training window ──────────────────────────
     logger.info("Training final model on full training window …")
-    # early_stopping_rounds is not an XGBRegressor constructor param — extract it
+    # Keep early_stopping_rounds on constructor for compatibility with installed xgboost API.
     final_params = {**best_params}
     final_params["tree_method"] = "hist"
-    es_rounds = final_params.pop("early_stopping_rounds", 50)
 
     final_model = xgb.XGBRegressor(**final_params, verbosity=0, random_state=42)
     final_model.fit(
