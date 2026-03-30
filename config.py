@@ -4,9 +4,27 @@ All values that might need tuning live here. Never scatter magic numbers across 
 """
 
 import os
+from datetime import date as _date, datetime as _datetime
+from zoneinfo import ZoneInfo
+
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# ─── Timezone ──────────────────────────────────────────────────────────────────
+# Ahmedabad is IST (UTC+5:30).  All date logic must use IST to avoid
+# mismatches between GitHub Actions (UTC), Streamlit Cloud, and the WAQI API.
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def today_ist() -> _date:
+    """Return today's date in IST regardless of the server's system timezone."""
+    return _datetime.now(IST).date()
+
+
+def now_ist() -> _datetime:
+    """Return the current datetime in IST."""
+    return _datetime.now(IST)
 
 # ─── WAQI API ─────────────────────────────────────────────────────────────────
 WAQI_API_TOKEN: str = os.getenv("WAQI_API_TOKEN", "")

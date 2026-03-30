@@ -9,27 +9,42 @@ Usage:
 
 import logging
 from datetime import date, timedelta
-from functools import lru_cache
 from typing import Optional
 
 from supabase import create_client, Client
 
-from config import SUPABASE_URL, SUPABASE_KEY
+from config import SUPABASE_URL, SUPABASE_KEY, today_ist
 
 logger = logging.getLogger(__name__)
 
 
-# ─── Client ───────────────────────────────────────────────────────────────────
+# ─── Client ───────────────────────────────────────────────────────────────────────
 
-@lru_cache(maxsize=1)
+_client: Client | None = None
+
+
 def get_client() -> Client:
-    """Return a cached Supabase client (created once per process)."""
+    """Return a Supabase client, creating one if needed.
+
+    Unlike ``@lru_cache``, this allows reconnection when ``reset_client()``
+    is called after a transient connection failure.
+    """
+    global _client
+    if _client is not None:
+        return _client
     if not SUPABASE_URL or not SUPABASE_KEY:
         raise EnvironmentError(
             "SUPABASE_URL and SUPABASE_KEY must be set before calling get_client(). "
             "Check your .env file or GitHub Actions Secrets."
         )
-    return create_client(SUPABASE_URL, SUPABASE_KEY)
+    _client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    return _client
+
+
+def reset_client() -> None:
+    """Discard the cached Supabase client so the next call creates a fresh one."""
+    global _client
+    _client = None
 
 
 # ─── Actuals ──────────────────────────────────────────────────────────────────
@@ -59,7 +74,7 @@ def get_actuals(days: int = 30, station: str = "ahmedabad") -> list[dict]:
     """
     Return the last `days` actual AQI rows for a station, ordered by date ascending.
     """
-    since = (date.today() - timedelta(days=days)).isoformat()
+    since = (today_ist() - timedelta(days=days)).isoformat()
     try:
         response = (
             get_client()
@@ -138,7 +153,7 @@ def get_prediction_for_date(target_date: date, station: str = "ahmedabad") -> Op
 
 def get_predictions(days: int = 30, station: str = "ahmedabad") -> list[dict]:
     """Return the last `days` prediction rows, ordered by date ascending."""
-    since = (date.today() - timedelta(days=days)).isoformat()
+    since = (today_ist() - timedelta(days=days)).isoformat()
     try:
         response = (
             get_client()
@@ -190,7 +205,7 @@ def log_performance(eval_date: date, model_ver: str, mae: float, rmse: float,
 
 def get_performance_history(days: int = 30) -> list[dict]:
     """Return the last `days` model performance rows, oldest first."""
-    since = (date.today() - timedelta(days=days)).isoformat()
+    since = (today_ist() - timedelta(days=days)).isoformat()
     try:
         response = (
             get_client()

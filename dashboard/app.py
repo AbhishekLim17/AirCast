@@ -16,7 +16,13 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from config import AQI_CATEGORIES, get_aqi_category, PRIMARY_STATION, RETRAIN_MAE_THRESHOLD
+from config import AQI_CATEGORIES, get_aqi_category, PRIMARY_STATION, RETRAIN_MAE_THRESHOLD, today_ist
+
+# Proper chemical notation for WAQI pollutant codes
+_POLLUTANT_DISPLAY = {
+    "PM25": "PM2.5", "PM10": "PM10", "NO2": "NO\u2082",
+    "SO2": "SO\u2082", "O3": "O\u2083", "CO": "CO",
+}
 from pipeline.db import (
     get_actuals,
     get_predictions,
@@ -133,34 +139,36 @@ with st.sidebar:
     )
     st.divider()
 
-    # ── AQI scale legend ───────────────────────────────────────────────────────
+    # ── AQI scale legend (theme-aware for dark mode) ─────────────────────────────────
+    _sb_theme = THEMES[st.session_state.theme_mode]
     st.markdown(
-        "<div style='font-size:10px;color:#6366f1;letter-spacing:2px;font-weight:700;"
-        "text-transform:uppercase;margin-bottom:10px;font-family:Inter,sans-serif;'>"
-        "AQI Scale · CPCB India</div>",
+        f"<div style='font-size:10px;color:{_sb_theme['accent']};letter-spacing:2px;font-weight:700;"
+        f"text-transform:uppercase;margin-bottom:10px;font-family:Inter,sans-serif;'>"
+        f"AQI Scale · CPCB India</div>",
         unsafe_allow_html=True,
     )
     for cat in AQI_CATEGORIES:
         st.markdown(
             f"<div style='display:flex;align-items:center;gap:10px;margin-bottom:6px;"
-            f"background:rgba(255,255,255,0.55);backdrop-filter:blur(8px);"
-            f"border:1px solid rgba(255,255,255,0.8);border-radius:10px;padding:6px 10px;'>"
+            f"background:{_sb_theme['glass']};backdrop-filter:blur(8px);"
+            f"border:1px solid {_sb_theme['glass_border']};border-radius:10px;padding:6px 10px;'>"
             f"<div style='width:10px;height:10px;border-radius:50%;flex-shrink:0;"
             f"background:{cat['color']};box-shadow:0 0 8px {cat['color']}88;'></div>"
-            f"<div style='font-size:12px;font-weight:600;font-family:Inter,sans-serif;'>"
+            f"<div style='font-size:12px;font-weight:600;color:{_sb_theme['text']};"
+            f"font-family:Inter,sans-serif;'>"
             f"{cat['label']} "
-            f"<span style='color:#64748b;font-weight:400;font-size:11px;'>"
+            f"<span style='color:{_sb_theme['muted']};font-weight:400;font-size:11px;'>"
             f"({cat['min']}–{cat['max']})</span></div>"
             f"</div>",
             unsafe_allow_html=True,
         )
     st.divider()
     st.markdown(
-        f"<div style='font-size:10px;color:#64748b;font-family:Inter,sans-serif;'>"
-        f"📍 Station: <span style='color:#6366f1;font-weight:600;'>"
+        f"<div style='font-size:10px;color:{_sb_theme['muted']};font-family:Inter,sans-serif;'>"
+        f"📍 Station: <span style='color:{_sb_theme['accent']};font-weight:600;'>"
         f"{PRIMARY_STATION.upper()}</span><br>"
-        f"🗓️ Updated: <span style='color:#475569;'>"
-        f"{date.today().strftime('%d %b %Y')}</span></div>",
+        f"🗓️ Updated: <span style='color:{_sb_theme['text']};'>"
+        f"{today_ist().strftime('%d %b %Y')}</span></div>",
         unsafe_allow_html=True,
     )
 
@@ -479,7 +487,7 @@ def load_live() -> dict | None:
 
 @st.cache_data(ttl=300)
 def load_tomorrow_prediction() -> float | None:
-    tomorrow = date.today() + timedelta(days=1)
+    tomorrow = today_ist() + timedelta(days=1)
     from pipeline.db import get_prediction_for_date
     row = get_prediction_for_date(target_date=tomorrow, station=PRIMARY_STATION)
     return float(row["predicted"]) if row else None
@@ -541,7 +549,15 @@ def make_gauge(value: float, title: str) -> go.Figure:
 def make_forecast_chart(df: pd.DataFrame) -> go.Figure:
     fig = go.Figure()
 
-    # AQI band backgrounds
+    # Dynamic Y-axis ceiling based on actual data (avoids vast empty charts)
+    _max_val = 0.0
+    if "actual_aqi" in df.columns and df["actual_aqi"].notna().any():
+        _max_val = max(_max_val, float(df["actual_aqi"].max()))
+    if "predicted" in df.columns and df["predicted"].notna().any():
+        _max_val = max(_max_val, float(df["predicted"].max()))
+    y_ceiling = min(520, max(_max_val * 1.3, 100))
+
+    # AQI band backgrounds (only up to ceiling)
     for lo, hi, rgba in [
         (0,   50,  "rgba(16,185,129,0.06)"),
         (51,  100, "rgba(132,204,22,0.06)"),
@@ -550,7 +566,8 @@ def make_forecast_chart(df: pd.DataFrame) -> go.Figure:
         (301, 400, "rgba(239,68,68,0.07)"),
         (401, 500, "rgba(127,29,29,0.07)"),
     ]:
-        fig.add_hrect(y0=lo, y1=hi, fillcolor=rgba, line_width=0, layer="below")
+        if lo < y_ceiling:
+            fig.add_hrect(y0=lo, y1=min(hi, y_ceiling), fillcolor=rgba, line_width=0, layer="below")
 
     if "actual_aqi" in df.columns and df["actual_aqi"].notna().any():
         fig.add_trace(go.Scatter(
@@ -592,19 +609,19 @@ def make_forecast_chart(df: pd.DataFrame) -> go.Figure:
         yaxis=dict(
             title=dict(text="AQI", font=dict(color=theme["muted"], size=12, family="Inter")),
             showgrid=True, gridcolor=theme["chart_grid"], zeroline=False,
-            range=[0, 520],
-            dtick=100,
+            range=[0, y_ceiling],
+            dtick=50 if y_ceiling <= 250 else 100,
             tickfont=dict(color=theme["chart_tick"], size=11, family="Inter"),
             showline=True, linecolor=theme["chart_grid"],
             automargin=True,
             fixedrange=True,
         ),
         legend=dict(
-            orientation="h", y=-0.22, x=0.5, xanchor="center",
+            orientation="h", y=-0.18, x=0.5, xanchor="center",
             bgcolor="rgba(0,0,0,0)",
             font=dict(color=theme["text"], size=12, family="Inter"),
         ),
-        margin=dict(t=16, b=80, l=64, r=20),
+        margin=dict(t=16, b=72, l=64, r=20),
         hovermode="x unified",
         hoverlabel=dict(
             bgcolor="rgba(255,255,255,0.96)" if not is_dark else "rgba(15,23,42,0.96)",
@@ -743,9 +760,8 @@ with col_g1:
                 use_container_width=True,
                 config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False, "staticPlot": True},
             )
-            dominant = html_lib.escape(
-                (live_data.get("dominant_pollutant") or "N/A").upper()
-            )
+            _raw_poll = (live_data.get("dominant_pollutant") or "N/A").upper()
+            dominant = html_lib.escape(_POLLUTANT_DISPLAY.get(_raw_poll, _raw_poll))
             st.markdown(
                 f"<div style='text-align:center;font-size:12px;color:{theme['muted']};"
                 f"font-family:Inter,sans-serif;margin-top:-8px;'>"
@@ -918,6 +934,14 @@ with st.container(border=True):
             config={"displayModeBar": False, "scrollZoom": False,
                     "doubleClick": False, "staticPlot": False},
         )
+        if len(chart_df) < days_range:
+            st.markdown(
+                f"<div style='text-align:center;font-size:11px;color:{theme['muted']};"
+                f"margin-top:-8px;font-family:Inter,sans-serif;'>"
+                f"\u2139\ufe0f Showing {len(chart_df)} day(s) of data "
+                f"({days_range}-day window selected)</div>",
+                unsafe_allow_html=True,
+            )
 
 # ─── Row 3: Accuracy history + Retrain log ────────────────────────────────────
 
@@ -933,10 +957,10 @@ with col_acc:
         )
         if perf_df.empty:
             st.markdown(
-                f"<div style='color:{theme['empty_text']};font-size:13px;padding:20px 0;"
-                f"font-family:Inter,sans-serif;'>"
-                f"📉 <b>Accuracy history will appear here</b> after the model has run its "
-                f"first evaluation (the day after the first prediction is made).</div>",
+                f"<div style='color:{theme['empty_text']};font-size:12px;padding:16px 0;"
+                f"text-align:center;font-family:Inter,sans-serif;'>"
+                f"\ud83d\udcc9 Accuracy history appears after the model's first "
+                f"evaluation cycle (\u2248 2 days after deployment).</div>",
                 unsafe_allow_html=True,
             )
         else:
@@ -956,12 +980,10 @@ with col_ret:
         )
         if perf_df.empty:
             st.markdown(
-                f"<div style='color:{theme['empty_text']};font-size:13px;padding:20px 0;"
-                f"font-family:Inter,sans-serif;'>"
-                f"🔄 <b>No retraining events yet.</b><br>"
-                f"<span style='font-size:12px;'>When the model's prediction error gets too high "
-                f"(MAE > {RETRAIN_MAE_THRESHOLD}), the AI automatically re-trains itself on fresh "
-                f"data. Each event is logged here.</span></div>",
+                f"<div style='color:{theme['empty_text']};font-size:12px;padding:16px 0;"
+                f"text-align:center;font-family:Inter,sans-serif;'>"
+                f"\ud83d\udd04 Retrain events appear when prediction error exceeds "
+                f"MAE {RETRAIN_MAE_THRESHOLD}. The AI retrains itself automatically.</div>",
                 unsafe_allow_html=True,
             )
         else:

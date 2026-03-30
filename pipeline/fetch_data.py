@@ -13,7 +13,7 @@ import requests
 from datetime import date, timedelta
 from typing import Optional
 
-from config import WAQI_API_TOKEN, WAQI_BASE_URL, AHMEDABAD_STATIONS
+from config import WAQI_API_TOKEN, WAQI_BASE_URL, AHMEDABAD_STATIONS, today_ist
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +92,7 @@ def fetch_current_aqi(station: str) -> Optional[dict]:
     try:
         obs_date = date.fromisoformat(obs_date_str)
     except ValueError:
-        obs_date = date.today()
+        obs_date = today_ist()
         logger.warning("Could not parse date '%s' for station '%s', using today", obs_date_str, station)
 
     return {
@@ -141,7 +141,7 @@ def fetch_yesterday_aqi(station: str) -> Optional[dict]:
     if reading is None:
         return None
 
-    yesterday = date.today() - timedelta(days=1)
+    yesterday = today_ist() - timedelta(days=1)
     if reading["date"] != yesterday:
         logger.warning(
             "Most recent reading from '%s' is %s, not %s (yesterday). Skipping.",

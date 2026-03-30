@@ -35,8 +35,9 @@ from config import (
     LAG_DAYS as FEATURE_LAGS,
     ROLLING_WINDOWS,
     validate_config,
+    today_ist,
 )
-from pipeline.fetch_data import fetch_current_aqi, fetch_yesterday_aqi
+from pipeline.fetch_data import fetch_current_aqi
 from pipeline.db import (
     upsert_actual,
     get_actuals,
@@ -63,55 +64,55 @@ logger = logging.getLogger(__name__)
 
 EVAL_WINDOW_DAYS = 7   # number of recent days used to decide retraining
 
-# Validate all required env vars early so we fail with a clear message
-# rather than hitting cryptic HTTP 401s deep inside the pipeline.
-validate_config()
+# validate_config() is called inside run() to avoid crashing at import time.
 
 
 # ─── Step helpers ─────────────────────────────────────────────────────────────
 
 def step_fetch_actual(yesterday: date, dry_run: bool) -> float | None:
-    """Fetch yesterday's AQI from WAQI and store in DB. Returns the AQI value."""
-    logger.info("━━ Step 1: Fetch yesterday's actual AQI (%s) ━━", yesterday)
+    """Fetch the latest AQI from WAQI and store it in the DB.
 
-    data = fetch_yesterday_aqi(PRIMARY_STATION)
-    used_fallback = False
-    if data is None:
-        logger.warning("WAQI returned no data for %s — trying current reading as fallback", yesterday)
-        data = fetch_current_aqi(PRIMARY_STATION)
-        used_fallback = True
+    The reading is always persisted (via upsert) regardless of its date so
+    that no data is silently lost.  Returns the AQI value only when the
+    reading is actually for *yesterday* (needed for evaluation in step 3).
+    """
+    logger.info("━━ Step 1: Fetch actual AQI (target: %s) ━━", yesterday)
 
+    data = fetch_current_aqi(PRIMARY_STATION)
     if data is None:
-        logger.error("Could not fetch AQI data from WAQI. Aborting.")
+        logger.error("  Could not fetch AQI data from WAQI. Aborting step.")
         return None
 
     reading_date = data.get("date")
-    if used_fallback and reading_date != yesterday:
-        logger.warning(
-            "Fallback reading is dated %s (expected %s). Skipping write/eval for yesterday to avoid date drift.",
-            reading_date,
-            yesterday,
-        )
-        return None
-
     actual_aqi = float(data.get("aqi") or data.get("value", 0))
-    # BUG-FIX: fetch_current_aqi returns key "dominant_pollutant", not "dominentpol"
-    dominant   = data.get("dominant_pollutant", "unknown")
+    dominant = data.get("dominant_pollutant", "unknown")
 
-    logger.info("  Actual AQI for %s: %.1f (dominant: %s)", yesterday, actual_aqi, dominant)
+    logger.info(
+        "  WAQI reading: AQI %.1f on %s (dominant: %s)",
+        actual_aqi, reading_date, dominant,
+    )
 
+    # Always persist the reading — upsert is safe for duplicate dates
     if not dry_run:
         upsert_actual({
-            "date":               yesterday,
+            "date":               reading_date,
             "station":            PRIMARY_STATION,
             "aqi":                actual_aqi,
             "dominant_pollutant": dominant,
         })
-        logger.info("  ✓ Saved to DB")
+        logger.info("  ✓ Actual for %s saved to DB", reading_date)
     else:
         logger.info("  [DRY-RUN] Skipped DB write")
 
-    return actual_aqi
+    # For evaluation we need exactly yesterday's value
+    if reading_date == yesterday:
+        return actual_aqi
+
+    logger.warning(
+        "  Reading is from %s (wanted %s) — stored but eval will be skipped.",
+        reading_date, yesterday,
+    )
+    return None
 
 
 def _recent_prediction_bias(days: int = 21, min_points: int = 7) -> float:
@@ -523,7 +524,8 @@ def _build_features_from_actuals(
 # ─── Main orchestrator ────────────────────────────────────────────────────────
 
 def run(force_retrain: bool = False, dry_run: bool = False) -> None:
-    today     = date.today()
+    validate_config()
+    today     = today_ist()
     yesterday = today - timedelta(days=1)
 
     logger.info("╔══════════════════════════════════════════════╗")
