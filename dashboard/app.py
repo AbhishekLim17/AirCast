@@ -938,7 +938,7 @@ with st.container(border=True):
             st.markdown(
                 f"<div style='text-align:center;font-size:11px;color:{theme['muted']};"
                 f"margin-top:-8px;font-family:Inter,sans-serif;'>"
-                f"\u2139\ufe0f Showing {len(chart_df)} day(s) of data "
+                f"ℹ️ Showing {len(chart_df)} day(s) of data "
                 f"({days_range}-day window selected)</div>",
                 unsafe_allow_html=True,
             )
@@ -959,8 +959,8 @@ with col_acc:
             st.markdown(
                 f"<div style='color:{theme['empty_text']};font-size:12px;padding:16px 0;"
                 f"text-align:center;font-family:Inter,sans-serif;'>"
-                f"\ud83d\udcc9 Accuracy history appears after the model's first "
-                f"evaluation cycle (\u2248 2 days after deployment).</div>",
+                f"📉 Accuracy history appears after the model's first "
+                f"evaluation cycle (≈ 2 days after deployment).</div>",
                 unsafe_allow_html=True,
             )
         else:
@@ -982,7 +982,7 @@ with col_ret:
             st.markdown(
                 f"<div style='color:{theme['empty_text']};font-size:12px;padding:16px 0;"
                 f"text-align:center;font-family:Inter,sans-serif;'>"
-                f"\ud83d\udd04 Retrain events appear when prediction error exceeds "
+                f"🔄 Retrain events appear when prediction error exceeds "
                 f"MAE {RETRAIN_MAE_THRESHOLD}. The AI retrains itself automatically.</div>",
                 unsafe_allow_html=True,
             )
