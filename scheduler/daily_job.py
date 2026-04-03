@@ -41,6 +41,7 @@ from pipeline.fetch_data import fetch_current_aqi
 from pipeline.db import (
     upsert_actual,
     get_actuals,
+    get_predictions,
     get_prediction_for_date,
     insert_prediction,
     log_performance,
@@ -185,6 +186,61 @@ def _calibrate_prediction(raw_pred: float, recent_actuals: list[float]) -> tuple
     return calibrated, diag
 
 
+def _adaptive_model_weight(days: int = 21, min_points: int = 4) -> tuple[float, dict]:
+    """
+    Compute blend weight for model forecast vs persistence baseline.
+
+    Persistence baseline for a date d is previous day's actual AQI.
+    Returns (model_weight, diagnostics).
+    """
+    joined = get_joined_chart_data(days=days, station=PRIMARY_STATION)
+    overlap = [r for r in joined if r.get("predicted") is not None and r.get("actual_aqi") is not None]
+    if len(overlap) < min_points:
+        return 0.7, {"reason": "insufficient_overlap", "points": len(overlap)}
+
+    actual_rows = get_actuals(days=days + 7, station=PRIMARY_STATION)
+    actual_map = {r["date"]: float(r["actual_aqi"]) for r in actual_rows}
+
+    y_true = []
+    y_model = []
+    y_persist = []
+    for r in overlap:
+        d = date.fromisoformat(r["date"])
+        prev_d = (d - timedelta(days=1)).isoformat()
+        if prev_d not in actual_map:
+            continue
+        y_true.append(float(r["actual_aqi"]))
+        y_model.append(float(r["predicted"]))
+        y_persist.append(actual_map[prev_d])
+
+    if len(y_true) < min_points:
+        return 0.7, {"reason": "insufficient_prev_day_pairs", "points": len(y_true)}
+
+    y_true = np.array(y_true, dtype=float)
+    y_model = np.array(y_model, dtype=float)
+    y_persist = np.array(y_persist, dtype=float)
+    mae_model = float(np.mean(np.abs(y_true - y_model)))
+    mae_persist = float(np.mean(np.abs(y_true - y_persist)))
+
+    # Choose aggressive blending toward whichever signal is materially better.
+    if mae_model > mae_persist * 1.05:
+        w_model = 0.2
+        mode = "favor_persistence"
+    elif mae_persist > mae_model * 1.05:
+        w_model = 0.8
+        mode = "favor_model"
+    else:
+        w_model = 0.5
+        mode = "balanced"
+
+    return w_model, {
+        "reason": mode,
+        "points": len(y_true),
+        "mae_model": round(mae_model, 3),
+        "mae_persist": round(mae_persist, 3),
+    }
+
+
 def step_load_prediction(yesterday: date) -> float | None:
     """Load the prediction we made yesterday for yesterday's date."""
     logger.info("━━ Step 2: Load yesterday's stored prediction (%s) ━━", yesterday)
@@ -230,6 +286,51 @@ def step_evaluate(
         logger.info("  [DRY-RUN] Skipped DB write")
 
     return m
+
+
+def step_backfill_missing_performance(days: int, dry_run: bool) -> int:
+    """
+    Backfill missing rows in model_performance using existing prediction/actual pairs.
+
+    This keeps dashboard MAE/MAPE charts populated even when the scheduler could not
+    evaluate on a specific day (e.g., WAQI date lag for "yesterday").
+    Returns number of rows inserted.
+    """
+    preds = get_predictions(days=days, station=PRIMARY_STATION)
+    acts = get_actuals(days=days, station=PRIMARY_STATION)
+    history = get_performance_history(days=days + 7)
+
+    pred_map = {r["date"]: r for r in preds}
+    act_map = {r["date"]: r for r in acts}
+    existing_eval_dates = {r["eval_date"] for r in history}
+
+    inserted = 0
+    for d in sorted(set(pred_map.keys()) & set(act_map.keys())):
+        if d in existing_eval_dates:
+            continue
+
+        pred_val = float(pred_map[d]["predicted"])
+        act_val = float(act_map[d]["actual_aqi"])
+        model_ver = pred_map[d].get("model_ver") or "unknown"
+        metrics = compute_metrics(np.array([act_val]), np.array([pred_val]))
+
+        if not dry_run:
+            log_performance(
+                eval_date=date.fromisoformat(d),
+                model_ver=model_ver,
+                mae=metrics["mae"],
+                rmse=metrics["rmse"],
+                mape=metrics["mape"],
+                retrain_triggered=False,
+            )
+        inserted += 1
+
+    if inserted:
+        logger.info(
+            "  %s missing performance row(s) backfilled from existing overlap data",
+            inserted,
+        )
+    return inserted
 
 
 def step_decide_retrain(force: bool) -> tuple[bool, str]:
@@ -388,10 +489,13 @@ def step_predict_tomorrow(
     bias_adjusted = float(np.clip(raw_pred + bias, 0.0, 500.0))
 
     calibrated, cal_diag = _calibrate_prediction(bias_adjusted, recent_actual_values)
-    predicted_aqi = round(calibrated, 1)
+    persistence_forecast = float(recent_actual_values[-1]) if recent_actual_values else calibrated
+    w_model, w_diag = _adaptive_model_weight(days=21, min_points=4)
+    final_pred = w_model * float(calibrated) + (1.0 - w_model) * persistence_forecast
+    predicted_aqi = round(float(np.clip(final_pred, 0.0, 500.0)), 1)
 
     logger.info(
-        "  Predicted AQI for %s: %.1f  (raw: %.1f, bias_adj: %.1f, center: %s, alpha: %s, band: [%s, %s], model: %s)",
+        "  Predicted AQI for %s: %.1f  (raw: %.1f, bias_adj: %.1f, center: %s, alpha: %s, band: [%s, %s], persist: %.1f, w_model: %.2f, blend_mode: %s, model: %s)",
         today + timedelta(days=1),
         predicted_aqi,
         raw_pred,
@@ -400,6 +504,9 @@ def step_predict_tomorrow(
         cal_diag.get("alpha"),
         cal_diag.get("clip_low"),
         cal_diag.get("clip_high"),
+        persistence_forecast,
+        w_model,
+        w_diag.get("reason"),
         model_ver,
     )
 
@@ -543,6 +650,9 @@ def run(force_retrain: bool = False, dry_run: bool = False) -> None:
         step_evaluate(yesterday, actual, predicted, dry_run)
     else:
         logger.warning("Skipping evaluation — missing actual or prediction for %s", yesterday)
+
+    # Ensure dashboard/decision metrics stay populated despite occasional WAQI date lag.
+    step_backfill_missing_performance(days=30, dry_run=dry_run)
 
     # ── 4. Decide retraining ───────────────────────────────────────────────────
     do_retrain, reason = step_decide_retrain(force=force_retrain)
