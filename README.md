@@ -11,21 +11,22 @@ logs the error, and retrains itself automatically if accuracy drops below thresh
 ## Architecture
 
 ```
-GitHub Actions (cron 06:00 UTC daily)
+GitHub Actions (cron 23:30 UTC daily = 05:00 IST)
     │
     ▼
 scheduler/daily_job.py
     ├── 1. Fetch yesterday's actual AQI  (WAQI API → Supabase: actuals)
     ├── 2. Load yesterday's prediction   (Supabase: predictions)
     ├── 3. Compute MAE / RMSE / MAPE     (Supabase: model_performance)
-    ├── 4. If MAE > threshold → retrain XGBoost on last 90 days
-    ├── 5. If new model is better → push to Hugging Face Hub
-    └── 6. Generate tomorrow's prediction → store in Supabase
+    ├── 4. Backfill missing performance rows from prediction/actual overlaps
+    ├── 5. If rolling MAE (7d) > threshold → retrain XGBoost
+    ├── 6. Push retrained model to Hugging Face Hub
+    └── 7. Generate tomorrow's prediction (calibration + adaptive blending)
 
 Streamlit Dashboard (Streamlit Community Cloud)
     ├── Today's AQI prediction + health category
     ├── Predicted vs Actual chart (last 30 days)
-    ├── MAE / MAPE accuracy panel
+    ├── MAE / RMSE / MAPE accuracy panel
     └── Retraining history table
 ```
 
@@ -35,7 +36,7 @@ Streamlit Dashboard (Streamlit Community Cloud)
 
 | Layer | Tool | Cost |
 |---|---|---|
-| Language | Python 3.13 | Free |
+| Language | Python 3.11+ | Free |
 | ML Model | XGBoost + Optuna tuning | Free |
 | Database | Supabase (PostgreSQL) | Free (500MB) |
 | Model Storage | Hugging Face Hub | Free |
@@ -89,7 +90,7 @@ git clone https://github.com/AbhishekLim17/AirCast.git
 cd AirCast
 python -m venv venv
 venv\Scripts\activate        # Windows
-pip install -r requirements-actions.txt
+pip install -r requirements.txt
 ```
 
 ### 2. Configure environment
@@ -103,6 +104,8 @@ Required keys:
 - `WAQI_API_TOKEN` — free at [aqicn.org/api](https://aqicn.org/api/)
 - `SUPABASE_URL` + `SUPABASE_KEY` — from your [Supabase](https://supabase.com) project
 - `HF_TOKEN` + `HF_USERNAME` — from [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+- `HF_REPO_NAME` — target Hugging Face model repo name
+- `RETRAIN_MAE_THRESHOLD` — rolling MAE trigger for automatic retraining
 
 ### 3. Set up database
 
@@ -145,12 +148,10 @@ streamlit run dashboard/app.py
 
 ## Model Performance
 
-| Metric | Value |
-|---|---|
-| MAE | ~8.65 |
-| MAPE | ~5.01% |
-| Algorithm | XGBoost (Optuna-tuned) |
-| Training data | Kaggle India AQI 2015–2020 (Ahmedabad) |
+Metrics are live and change daily because the system self-corrects and retrains automatically.
+
+- See real-time MAE / RMSE / MAPE on the dashboard: [aircast-abad.streamlit.app](https://aircast-abad.streamlit.app)
+- For current values, treat dashboard numbers as the source of truth
 
 ---
 
